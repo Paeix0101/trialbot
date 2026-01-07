@@ -8,7 +8,6 @@ import requests
 TOKEN = os.environ.get("BOT_TOKEN")  # Bot token from BotFather
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g. https://your-service.onrender.com (no /webhook)
 BOT_API = f"https://api.telegram.org/bot{TOKEN}"
-
 OWNER_ID = 8141547148  # Main Owner with full control
 
 app = Flask(__name__)
@@ -16,7 +15,6 @@ app = Flask(__name__)
 repeat_jobs = {}  # {chat_id: [job_ref1, job_ref2, ...]}
 groups_file = "groups.txt"
 media_groups = {}  # store (chat_id, media_group_id) → (timestamp, list of message_ids)
-
 # Track last one-time broadcast message IDs for deletion
 last_broadcast_ids = {}  # {group_id: message_id}
 
@@ -70,13 +68,11 @@ def check_required_permissions(chat_id):
 # --------- REPEATER FUNCTION --------- #
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_message_ids = []
-
     while job_ref["running"]:
         # Delete previous repeated messages
         for mid in last_message_ids:
             delete_message(chat_id, mid)
         last_message_ids = []
-
         try:
             if is_album:
                 resp = requests.post(f"{BOT_API}/copyMessages", json={
@@ -96,7 +92,6 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
                     last_message_ids = [resp.json()["result"]["message_id"]]
         except Exception as e:
             print(f"Error in repeater for chat {chat_id}: {e}")
-
         time.sleep(interval)
 
 # --------- Group Management --------- #
@@ -190,22 +185,16 @@ def cleanup_media_groups():
 
 threading.Thread(target=cleanup_media_groups, daemon=True).start()
 
-# -------------------- Keep-Alive Function -------------------- #
+# -------------------- Keep Alive -------------------- #
 def keep_alive():
-    APP_URL = os.environ.get("APP_URL")  # Set this to your full app URL, e.g. https://your-bot.onrender.com
-    if not APP_URL:
-        print("APP_URL not set in environment variables. Keep-alive disabled.")
-        return
+    """Pings the Render app every 5 minutes to prevent sleeping."""
     while True:
         try:
-            requests.get(APP_URL, timeout=10)
-            print(f"Keep-alive ping sent to {APP_URL}")
+            requests.get(WEBHOOK_URL)
+            print("✅ Keep-alive ping sent.")
         except Exception as e:
-            print("Keep-alive ping failed:", e)
-        time.sleep(300)  # Ping every 5 minutes (300 seconds)
-
-# Start the keep-alive thread in background
-threading.Thread(target=keep_alive, daemon=True).start()
+            print(f"❌ Keep-alive failed: {e}")
+        time.sleep(300)  # 5 minutes
 
 # -------------------- Webhook -------------------- #
 @app.route("/webhook", methods=["POST"])
@@ -213,7 +202,6 @@ def webhook():
     update = request.get_json()
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
-
     # Handle bot added/removed or status change
     if my_chat_member:
         chat = my_chat_member["chat"]
@@ -221,7 +209,6 @@ def webhook():
         chat_type = chat["type"]
         chat_title = chat.get("title", "")
         new_status = my_chat_member["new_chat_member"]["status"]
-
         if new_status in ["administrator", "member"]:
             if not check_required_permissions(chat_id):
                 send_message(OWNER_ID, f"❌ Missing required permissions in {chat_title} ({chat_id})")
@@ -229,23 +216,18 @@ def webhook():
             save_group_id(chat_id)
             notify_owner_new_group(chat_id, chat_type, chat_title)
         return "OK"
-
     if not msg:
         return "OK"
-
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or msg.get("caption") or "").strip()
     from_user = msg.get("from", {})
     user_id = from_user.get("id")
-
     # Save group ID
     if str(chat_id).startswith("-"):
         save_group_id(chat_id)
-
     # Get admins (for groups)
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
-
     # Collect media group
     if "media_group_id" in msg:
         mgid = msg["media_group_id"]
@@ -253,14 +235,12 @@ def webhook():
         if key not in media_groups:
             media_groups[key] = (time.time(), [])
         media_groups[key][1].append(msg["message_id"])
-
     # === OWNER COMMANDS ===
     if chat_id == OWNER_ID:
         if text.startswith("-") and len(text) > 1:
             status = check_bot_status(text[1:])
             send_message(chat_id, status)
             return "OK"
-
         if text.lower().startswith("/invitelink"):
             parts = text.split()
             if len(parts) == 2:
@@ -269,18 +249,15 @@ def webhook():
             else:
                 send_message(chat_id, "Usage: /invitelink <group_id>")
             return "OK"
-
         if text.startswith("/lemonchus") and "reply_to_message" in msg:
             replied = msg["reply_to_message"]
             count = broadcast_message_once(chat_id, replied["message_id"])
             send_message(chat_id, f"✅ Broadcast sent to {count} groups.\nUse /lemonchusstop to delete.")
             return "OK"
-
         if text.startswith("/lemonchusstop"):
             deleted = delete_last_broadcast()
             send_message(chat_id, f"🗑️ Deleted from {deleted} groups." if deleted else "ℹ️ No broadcast to delete.")
             return "OK"
-
     # === /start ===
     if text.lower() == "/start":
         start_msg = (
@@ -297,26 +274,21 @@ def webhook():
         )
         send_message(chat_id, start_msg, parse_mode="HTML")
         return "OK"
-
     # === DYNAMIC REPEAT COMMAND: /repeatXminute ===
     if "reply_to_message" in msg and re.match(r"/repeat\d+minute", text, re.IGNORECASE):
         if not is_admin:
             send_message(chat_id, "❌ Only admins can use this command.")
             return "OK"
-
         match = re.search(r"(\d+)minute", text, re.IGNORECASE)
         if not match:
             send_message(chat_id, "❌ Invalid format. Use: /repeat30minute")
             return "OK"
-
         minutes = int(match.group(1))
         if minutes < 1:
             send_message(chat_id, "❌ Minimum interval is 1 minute.")
             return "OK"
-
         interval = minutes * 60
         replied_msg = msg["reply_to_message"]
-
         if "media_group_id" in replied_msg:
             mgid = replied_msg["media_group_id"]
             key = (chat_id, mgid)
@@ -325,7 +297,6 @@ def webhook():
         else:
             message_ids = [replied_msg["message_id"]]
             is_album = False
-
         job_ref = {"running": True}
         repeat_jobs.setdefault(chat_id, []).append(job_ref)
         threading.Thread(
@@ -333,16 +304,13 @@ def webhook():
             args=(chat_id, message_ids, interval, job_ref, is_album),
             daemon=True
         ).start()
-
         send_message(chat_id, f"✅ Started repeating every <b>{minutes}</b> minute(s).", parse_mode="HTML")
         return "OK"
-
     # === /stop ===
     if text == "/stop":
         if not is_admin:
             send_message(chat_id, "❌ Only admins can use this command.")
             return "OK"
-
         if chat_id in repeat_jobs:
             for job in repeat_jobs[chat_id]:
                 job["running"] = False
@@ -351,13 +319,17 @@ def webhook():
         else:
             send_message(chat_id, "ℹ️ No active repeat jobs.")
         return "OK"
-
     return "OK"
 
 @app.route("/")
 def index():
     return "Bot is running!"
 
-# For platforms like Render, Replit, etc.
+# -------------------- Run App -------------------- #
 if __name__ == "__main__":
+    # Set webhook on startup
+    requests.get(f"{BOT_API}/setWebhook?url={WEBHOOK_URL}/webhook")
+    # Start keep-alive thread
+    threading.Thread(target=keep_alive, daemon=True).start()
+    # Run Flask app (important for Render, Railway, etc.)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
