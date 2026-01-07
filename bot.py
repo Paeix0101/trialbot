@@ -190,6 +190,23 @@ def cleanup_media_groups():
 
 threading.Thread(target=cleanup_media_groups, daemon=True).start()
 
+# -------------------- Keep-Alive Function -------------------- #
+def keep_alive():
+    APP_URL = os.environ.get("APP_URL")  # Set this to your full app URL, e.g. https://your-bot.onrender.com
+    if not APP_URL:
+        print("APP_URL not set in environment variables. Keep-alive disabled.")
+        return
+    while True:
+        try:
+            requests.get(APP_URL, timeout=10)
+            print(f"Keep-alive ping sent to {APP_URL}")
+        except Exception as e:
+            print("Keep-alive ping failed:", e)
+        time.sleep(300)  # Ping every 5 minutes (300 seconds)
+
+# Start the keep-alive thread in background
+threading.Thread(target=keep_alive, daemon=True).start()
+
 # -------------------- Webhook -------------------- #
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -340,3 +357,7 @@ def webhook():
 @app.route("/")
 def index():
     return "Bot is running!"
+
+# For platforms like Render, Replit, etc.
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
