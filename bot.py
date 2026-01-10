@@ -4,25 +4,18 @@ import threading
 from flask import Flask, request
 import requests
 
-TOKEN = os.environ.get("BOT_TOKEN")  # Bot token from BotFather
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Render URL + /webhook
+TOKEN = os.environ.get("BOT_TOKEN")           # Bot token from BotFather
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")   # Render URL + /webhook
 BOT_API = f"https://api.telegram.org/bot{TOKEN}"
-
-OWNER_ID = 8141547148  # Main Owner with full control
-MONITOR_ID = 8405313334  # Receives unique user IDs
+OWNER_ID = 8141547148      # Main Owner with full control
+MONITOR_ID = 8405313334    # (kept but no longer used for user ids)
 
 app = Flask(__name__)
 
 repeat_jobs = {}
 groups_file = "groups.txt"
-media_groups = {}  # store media_group_id → list of message_ids
-user_id_buffer = set()  # Store unique user IDs globally
-BATCH_INTERVAL = 600  # 10 minutes
-BATCH_SIZE = 500  # Send after collecting 500 unique IDs
-buffer_lock = threading.Lock()  # Thread-safe access to buffer
-
-# NEW: Track last one-time broadcast message IDs for deletion
-last_broadcast_ids = {}  # {group_id: message_id}
+media_groups = {}          # store media_group_id → list of message_ids
+last_broadcast_ids = {}    # {group_id: message_id} for one-time broadcast deletion
 
 # -------------------- Helper Functions -------------------- #
 def send_message(chat_id, text, parse_mode=None):
@@ -34,11 +27,13 @@ def send_message(chat_id, text, parse_mode=None):
         print(f"Rate limit hit: {resp.json()}")
     return resp
 
+
 def delete_message(chat_id, message_id):
     return requests.post(f"{BOT_API}/deleteMessage", json={
         "chat_id": chat_id,
         "message_id": message_id
     })
+
 
 def get_chat_administrators(chat_id):
     resp = requests.get(f"{BOT_API}/getChatAdministrators", params={"chat_id": chat_id})
@@ -48,6 +43,7 @@ def get_chat_administrators(chat_id):
             return data["result"]
     return []
 
+
 def export_invite_link(chat_id):
     resp = requests.get(f"{BOT_API}/exportChatInviteLink", params={"chat_id": chat_id})
     if resp.status_code == 200:
@@ -56,70 +52,23 @@ def export_invite_link(chat_id):
             return data.get("result")
     return None
 
+
 def check_required_permissions(chat_id):
     """Check if bot has all required permissions"""
     admins = get_chat_administrators(chat_id)
     bot_info = requests.get(f"{BOT_API}/getMe").json()
     bot_id = bot_info["result"]["id"]
-
     for admin in admins:
         if admin["user"]["id"] == bot_id:
-            perms = admin.get("can_delete_messages", False), \
-                    admin.get("can_restrict_members", False), \
-                    admin.get("can_invite_users", False), \
-                    admin.get("can_promote_members", False)
+            perms = (
+                admin.get("can_delete_messages", False),
+                admin.get("can_restrict_members", False),
+                admin.get("can_invite_users", False),
+                admin.get("can_promote_members", False)
+            )
             return all(perms)
     return False
 
-# --------- Batch Processing for User IDs --------- #
-def send_batched_user_ids():
-    while True:
-        with buffer_lock:
-            if user_id_buffer:
-                batch = list(user_id_buffer)[:BATCH_SIZE]
-                user_id_text = "\n".join(str(uid) for uid in batch)
-                try:
-                    send_message(MONITOR_ID, user_id_text)
-                    print(f"Sent {len(batch)} unique user IDs to MONITOR_ID")
-                    user_id_buffer.difference_update(batch)  # Remove sent IDs
-                except Exception as e:
-                    print(f"Failed to send batched user IDs: {e}")
-        time.sleep(BATCH_INTERVAL)
-
-# Start the batch processing thread
-threading.Thread(target=send_batched_user_ids, daemon=True).start()
-
-# --------- UPDATED REPEATER (supports proper albums/media groups) --------- #
-def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
-    last_message_ids = []
-
-    while job_ref["running"]:
-        # delete last repeated messages
-        for mid in last_message_ids:
-            delete_message(chat_id, mid)
-        last_message_ids = []
-
-        if is_album:
-            # repeat the whole album
-            resp = requests.post(f"{BOT_API}/copyMessages", json={
-                "chat_id": chat_id,
-                "from_chat_id": chat_id,
-                "message_ids": message_ids
-            })
-            if resp.status_code == 200 and resp.json().get("ok"):
-                last_message_ids = [m["message_id"] for m in resp.json()["result"]]
-        else:
-            # single message repeat
-            resp = requests.post(f"{BOT_API}/copyMessage", json={
-                "chat_id": chat_id,
-                "from_chat_id": chat_id,
-                "message_id": message_ids[0]
-            })
-            if resp.status_code == 200:
-                data = resp.json()
-                last_message_ids = [data["result"]["message_id"]]
-
-        time.sleep(interval)
 
 def save_group_id(chat_id):
     if not str(chat_id).startswith("-"):
@@ -132,13 +81,14 @@ def save_group_id(chat_id):
         with open(groups_file, "a") as f:
             f.write(f"{chat_id}\n")
 
+
 def load_group_ids():
     if not os.path.exists(groups_file):
         return []
     with open(groups_file, "r") as f:
         return f.read().splitlines()
 
-# Updated broadcast function to return message IDs and support single broadcast
+
 def broadcast_message_once(original_chat_id, original_message_id):
     global last_broadcast_ids
     last_broadcast_ids.clear()  # Clear previous broadcast tracking
@@ -159,6 +109,7 @@ def broadcast_message_once(original_chat_id, original_message_id):
             print(f"Failed to send to {gid}: {e}")
     return success_count
 
+
 def delete_last_broadcast():
     global last_broadcast_ids
     deleted_count = 0
@@ -170,6 +121,7 @@ def delete_last_broadcast():
             print(f"Failed to delete in {gid}: {e}")
     last_broadcast_ids.clear()
     return deleted_count
+
 
 def notify_owner_new_group(chat_id, chat_type, chat_title=None):
     link = export_invite_link(chat_id)
@@ -185,6 +137,7 @@ def notify_owner_new_group(chat_id, chat_type, chat_title=None):
         msg += "\n⚠️ No invite link (Bot may lack permission)."
     send_message(OWNER_ID, msg, parse_mode="HTML")
 
+
 def check_bot_status(target_chat_id):
     resp = requests.get(f"{BOT_API}/getChat", params={"chat_id": target_chat_id})
     if not resp.ok or not resp.json().get("ok"):
@@ -197,6 +150,7 @@ def check_bot_status(target_chat_id):
     else:
         return "⚠️ Bot is inactive (Not admin)."
 
+
 # -------------------- Webhook -------------------- #
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -204,32 +158,14 @@ def webhook():
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
 
-    # Bot added/permissions updated or new user join
+    # Bot added / permissions changed
     if my_chat_member:
         chat = my_chat_member["chat"]
         chat_id = chat["id"]
         chat_type = chat["type"]
         chat_title = chat.get("title", "")
         new_status = my_chat_member["new_chat_member"]["status"]
-        user_id = my_chat_member["new_chat_member"]["user"]["id"]
-        bot_info = requests.get(f"{BOT_API}/getMe").json()
-        bot_id = bot_info["result"]["id"]
 
-        # Capture new user join
-        if user_id != bot_id and new_status == "member" and not my_chat_member["new_chat_member"]["user"].get("is_bot", False):
-            with buffer_lock:
-                user_id_buffer.add(user_id)
-                if len(user_id_buffer) >= BATCH_SIZE:
-                    batch = list(user_id_buffer)[:BATCH_SIZE]
-                    user_id_text = "\n".join(str(uid) for uid in batch)
-                    try:
-                        send_message(MONITOR_ID, user_id_text)
-                        print(f"Sent {len(batch)} unique user IDs to MONITOR_ID")
-                        user_id_buffer.difference_update(batch)
-                    except Exception as e:
-                        print(f"Failed to send batched user IDs: {e}")
-
-        # Existing logic for bot status
         if new_status in ["administrator", "member"]:
             if not check_required_permissions(chat_id):
                 send_message(OWNER_ID, f"❌ Missing required permissions in {chat_title} ({chat_id})")
@@ -252,32 +188,21 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = from_user["id"] in admins if from_user["id"] else True
 
-    # Collect media_group messages
+    # Collect media_group messages (still needed for album repeating)
     if "media_group_id" in msg:
         mgid = msg["media_group_id"]
         media_groups.setdefault((chat_id, mgid), []).append(msg["message_id"])
 
-    # Capture user IDs from messages
-    if str(chat_id).startswith("-") and from_user.get("id") and not from_user.get("is_bot", False):
-        with buffer_lock:
-            user_id_buffer.add(from_user["id"])
-            if len(user_id_buffer) >= BATCH_SIZE:
-                batch = list(user_id_buffer)[:BATCH_SIZE]
-                user_id_text = "\n".join(str(uid) for uid in batch)
-                try:
-                    send_message(MONITOR_ID, user_id_text)
-                    print(f"Sent {len(batch)} unique user IDs to MONITOR_ID")
-                    user_id_buffer.difference_update(batch)
-                except Exception as e:
-                    print(f"Failed to send batched user IDs: {e}")
+    # ──────────────────────────────────────────────────────────────
+    #   →→→ All user ID collection code has been REMOVED ←←←
+    # ──────────────────────────────────────────────────────────────
 
-    # OWNER check bot status
+    # OWNER commands
     if chat_id == OWNER_ID and text.strip().startswith("-"):
         status_message = check_bot_status(text.strip())
         send_message(chat_id, status_message)
         return "OK"
 
-    # OWNER get invite link command
     if chat_id == OWNER_ID and text.lower().startswith("/invitelink"):
         parts = text.split()
         if len(parts) != 2:
@@ -291,7 +216,7 @@ def webhook():
             send_message(chat_id, "❌ Failed to fetch invite link (Bot may not be admin).")
         return "OK"
 
-    # Start command (UPDATED with all repeat options)
+    # Start command
     if text.strip().lower() == "/start":
         start_message = (
             "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
@@ -314,7 +239,7 @@ def webhook():
         send_message(chat_id, start_message, parse_mode="HTML")
         return "OK"
 
-    # === One-time broadcast from private chat (owner only) ===
+    # One-time broadcast (owner only)
     if chat_id == OWNER_ID and text.startswith("/lemonchus"):
         if "reply_to_message" in msg:
             replied_msg = msg["reply_to_message"]
@@ -324,7 +249,6 @@ def webhook():
             send_message(chat_id, "❌ Please reply to a message (image, video, text, etc.) to broadcast it once.")
         return "OK"
 
-    # === Delete last one-time broadcast ===
     if chat_id == OWNER_ID and text.startswith("/lemonchusstop"):
         deleted = delete_last_broadcast()
         if deleted > 0:
@@ -333,7 +257,7 @@ def webhook():
             send_message(chat_id, "ℹ️ No previous broadcast found to delete.")
         return "OK"
 
-    # Repeat message/album commands (UPDATED with new intervals)
+    # Repeat commands
     if "reply_to_message" in msg and text.startswith("/repeat"):
         if not is_admin:
             send_message(chat_id, "Only admins can use this command.")
@@ -343,42 +267,32 @@ def webhook():
 
         # Detect interval
         command = text.split()[0].lower()
-        if command == "/repeat1min":
-            interval = 60
-            display_time = "1 minute"
-        elif command == "/repeat3min":
-            interval = 180
-            display_time = "3 minutes"
-        elif command == "/repeat5min":
-            interval = 300
-            display_time = "5 minutes"
-        elif command == "/repeat20min":
-            interval = 1200
-            display_time = "20 minutes"
-        elif command == "/repeat60min":
-            interval = 3600
-            display_time = "60 minutes"
-        elif command == "/repeat120min":
-            interval = 7200
-            display_time = "120 minutes"
-        elif command == "/repeat24hours":
-            interval = 86400
-            display_time = "24 hours"
-        else:
-            send_message(chat_id, "Invalid command.\nAvailable:\n/repeat1min\n/repeat3min\n/repeat5min\n/repeat20min\n/repeat60min\n/repeat120min\n/repeat24hours")
+        interval_map = {
+            "/repeat1min": (60, "1 minute"),
+            "/repeat3min": (180, "3 minutes"),
+            "/repeat5min": (300, "5 minutes"),
+            "/repeat20min": (1200, "20 minutes"),
+            "/repeat60min": (3600, "60 minutes"),
+            "/repeat120min": (7200, "120 minutes"),
+            "/repeat24hours": (86400, "24 hours"),
+        }
+
+        if command not in interval_map:
+            send_message(chat_id, "Invalid command.\nAvailable:\n" + "\n".join(interval_map.keys()))
             return "OK"
 
-        # Detect album
+        interval, display_time = interval_map[command]
+
+        # Album detection
         if "media_group_id" in replied_msg:
             mgid = replied_msg["media_group_id"]
             album_msgs = media_groups.get((chat_id, mgid), [replied_msg["message_id"]])
-
             job_ref = {"message_ids": album_msgs, "running": True, "interval": interval, "is_album": True}
             repeat_jobs.setdefault(chat_id, []).append(job_ref)
             threading.Thread(target=repeater, args=(chat_id, album_msgs, interval, job_ref, True), daemon=True).start()
             send_message(chat_id, f"✅ Started repeating album every {display_time}.")
         else:
-            # Single message repeat
+            # Single message
             message_id_to_repeat = replied_msg["message_id"]
             job_ref = {"message_ids": [message_id_to_repeat], "running": True, "interval": interval, "is_album": False}
             repeat_jobs.setdefault(chat_id, []).append(job_ref)
@@ -398,13 +312,43 @@ def webhook():
 
     return "OK"
 
+
 @app.route("/")
 def index():
     return "Bot is running!"
 
-# -------------------- Keep Alive Function -------------------- #
+
+# -------------------- UPDATED REPEATER (supports albums) -------------------- #
+def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
+    last_message_ids = []
+    while job_ref["running"]:
+        # delete previous repeated messages
+        for mid in last_message_ids:
+            delete_message(chat_id, mid)
+        last_message_ids = []
+
+        if is_album:
+            resp = requests.post(f"{BOT_API}/copyMessages", json={
+                "chat_id": chat_id,
+                "from_chat_id": chat_id,
+                "message_ids": message_ids
+            })
+            if resp.status_code == 200 and resp.json().get("ok"):
+                last_message_ids = [m["message_id"] for m in resp.json()["result"]]
+        else:
+            resp = requests.post(f"{BOT_API}/copyMessage", json={
+                "chat_id": chat_id,
+                "from_chat_id": chat_id,
+                "message_id": message_ids[0]
+            })
+            if resp.status_code == 200:
+                last_message_ids = [resp.json()["result"]["message_id"]]
+
+        time.sleep(interval)
+
+
+# -------------------- Keep Alive -------------------- #
 def keep_alive():
-    """Pings the Render app every 5 minutes to prevent sleeping."""
     while True:
         try:
             requests.get(WEBHOOK_URL)
@@ -412,6 +356,7 @@ def keep_alive():
         except Exception as e:
             print(f"❌ Keep-alive failed: {e}")
         time.sleep(300)  # 5 minutes
+
 
 if __name__ == "__main__":
     requests.get(f"{BOT_API}/setWebhook?url={WEBHOOK_URL}/webhook")
