@@ -19,7 +19,7 @@ media_groups = {}           # (chat_id, media_group_id) → {'ids': list, 'last_
 last_broadcast_ids = {}     # {group_id: message_id} for one-time broadcast deletion
 
 # -------------------- Helper Functions -------------------- #
-def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None):
+def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None, reply_markup=None):
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -28,6 +28,8 @@ def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None):
         payload["parse_mode"] = parse_mode
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     resp = requests.post(f"{BOT_API}/sendMessage", json=payload)
     if resp.status_code == 429:
         print(f"Rate limit hit: {resp.json()}")
@@ -40,6 +42,16 @@ def delete_message(chat_id, message_id):
         "chat_id": chat_id,
         "message_id": message_id
     })
+
+def answer_callback_query(callback_query_id, text=None, show_alert=False):
+    payload = {
+        "callback_query_id": callback_query_id,
+    }
+    if text:
+        payload["text"] = text
+    if show_alert:
+        payload["show_alert"] = show_alert
+    requests.post(f"{BOT_API}/answerCallbackQuery", json=payload)
 
 def get_chat_administrators(chat_id):
     resp = requests.get(f"{BOT_API}/getChatAdministrators", params={"chat_id": chat_id})
@@ -150,7 +162,7 @@ def cleanup_old_albums():
     while True:
         time.sleep(60)
         now = time.time()
-        to_delete = [k for k, v in media_groups.items() if now - v['last_time'] > 360]  # 6 min
+        to_delete = [k for k, v in media_groups.items() if now - v['last_time'] > 360]
         for k in to_delete:
             del media_groups[k]
 
@@ -158,9 +170,40 @@ def cleanup_old_albums():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json()
-    msg = update.get("message") or update.get("channel_post")
-    my_chat_member = update.get("my_chat_member")
 
+    # Handle callback from inline button
+    if "callback_query" in update:
+        callback = update["callback_query"]
+        query_id = callback["id"]
+        data = callback.get("data", "")
+        user = callback["from"]
+        chat_id = callback["message"]["chat"]["id"] if "message" in callback else None
+        message_id = callback["message"]["message_id"] if "message" in callback else None
+
+        if data == "verify_user":
+            # Send verification info in private
+            username = user.get("username", "No username")
+            first_name = user.get("first_name", "User")
+            user_id = user["id"]
+
+            verify_text = (
+                "✅ <b>Verification Successful</b>\n\n"
+                f"• User ID: <code>{user_id}</code>\n"
+                f"• Name: {first_name}\n"
+                f"• Username: @{username}\n\n"
+                "Status: <b>Verified</b> ✅"
+            )
+
+            send_message(user_id, verify_text, parse_mode="HTML")
+            answer_callback_query(query_id, text="Verification info sent in private!", show_alert=False)
+
+            # Optional: edit or delete the welcome message in group
+            # delete_message(chat_id, message_id)
+
+        return "OK"
+
+    # Handle my_chat_member (bot status change)
+    my_chat_member = update.get("my_chat_member")
     if my_chat_member:
         chat = my_chat_member["chat"]
         chat_id = chat["id"]
@@ -176,6 +219,7 @@ def webhook():
             notify_owner_new_group(chat_id, chat_type, chat_title)
         return "OK"
 
+    msg = update.get("message") or update.get("channel_post")
     if not msg:
         return "OK"
 
@@ -189,6 +233,68 @@ def webhook():
 
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = from_user.get("id") in admins if from_user.get("id") else True
+
+    # ─── NEW MEMBER WELCOME ───────────────────────────────────────
+    if "new_chat_members" in msg:
+        new_members = msg["new_chat_members"]
+        real_users = [m for m in new_members if not m.get("is_bot")]
+
+        if real_users:
+            # Try to delete default service message
+            try:
+                delete_message(chat_id, message_id)
+            except:
+                pass
+
+            chat_title = msg["chat"].get("title", "the Group")
+
+            for user in real_users:
+                user_id = user["id"]
+                first_name = user.get("first_name", "New Member")
+
+                welcome_text = (
+                    f"**Welcome to {chat_title}!**\n\n"
+                    f"👤 {first_name} has joined the group\n\n"
+                    "Please verify yourself using the button below 👇"
+                )
+
+                # Inline keyboard with Verify button
+                keyboard = {
+                    "inline_keyboard": [[
+                        {
+                            "text": "Verify",
+                            "callback_data": "verify_user"
+                        }
+                    ]]
+                }
+
+                send_message(
+                    chat_id,
+                    welcome_text,
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+
+        return "OK"
+
+    # ─── /verify command (alternative way) ─────────────────────────
+    if text.strip() == "/verify":
+        user = from_user
+        username = user.get("username", "No username")
+        first_name = user.get("first_name", "User")
+        user_id = user["id"]
+
+        verify_text = (
+            "✅ <b>Verification Info</b>\n\n"
+            f"• User ID: <code>{user_id}</code>\n"
+            f"• Name: {first_name}\n"
+            f"• Username: @{username}\n\n"
+            "Status: <b>Verified</b> ✅"
+        )
+
+        send_message(user_id, verify_text, parse_mode="HTML")
+        send_message(chat_id, "Verification information sent to you in private.", reply_to_message_id=message_id)
+        return "OK"
 
     # ─── Album collection ───────────────────────────────────────
     if "media_group_id" in msg:
@@ -221,7 +327,7 @@ def webhook():
     # /start
     if text.strip().lower() == "/start":
         start_msg = (
-       "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
+            "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
             "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
             "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
             "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) "
@@ -280,7 +386,6 @@ def webhook():
 
         interval, display = interval_map[cmd]
 
-        # ─── Send detecting message immediately ─────────────────────
         detecting_response = send_message(
             chat_id,
             "🔍 **Detecting media group/album...**\nPlease wait a moment.",
@@ -291,7 +396,6 @@ def webhook():
         if detecting_response.status_code == 200 and detecting_response.json().get("ok"):
             detecting_msg_id = detecting_response.json()["result"]["message_id"]
 
-        # ================== ALBUM DETECTION ==================
         album_ids = []
         is_album = False
 
@@ -331,14 +435,11 @@ def webhook():
             album_ids = [replied["message_id"]]
             result_text = f"**✓ Repeating started**\nInterval: every {display}"
 
-        # Delete detecting message
         if detecting_msg_id:
             delete_message(chat_id, detecting_msg_id)
 
-        # Send final result
         send_message(chat_id, result_text, parse_mode="Markdown", reply_to_message_id=message_id)
 
-        # Start repeating job
         job_ref = {
             "message_ids": album_ids,
             "running": True,
@@ -376,7 +477,6 @@ def index():
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_sent_ids = []
     while job_ref["running"]:
-        # Delete previous messages
         for mid in last_sent_ids:
             delete_message(chat_id, mid)
         last_sent_ids = []
