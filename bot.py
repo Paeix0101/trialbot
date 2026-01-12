@@ -14,8 +14,9 @@ app = Flask(__name__)
 
 repeat_jobs = {}
 groups_file = "groups.txt"
-media_groups = {}          # store media_group_id → list of message_ids
-last_broadcast_ids = {}    # {group_id: message_id} for one-time broadcast deletion
+media_groups = {}                    # store media_group_id → list of message_ids
+fresh_album_copies = {}              # {chat_id: {media_group_id: [fresh_message_ids]} }
+last_broadcast_ids = {}              # {group_id: message_id} for one-time broadcast deletion
 
 # -------------------- Helper Functions -------------------- #
 def send_message(chat_id, text, parse_mode=None):
@@ -188,14 +189,10 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = from_user["id"] in admins if from_user["id"] else True
 
-    # Collect media_group messages (still needed for album repeating)
+    # Collect media_group messages (still needed to know original album IDs)
     if "media_group_id" in msg:
         mgid = msg["media_group_id"]
         media_groups.setdefault((chat_id, mgid), []).append(msg["message_id"])
-
-    # ──────────────────────────────────────────────────────────────
-    #   →→→ All user ID collection code has been REMOVED ←←←
-    # ──────────────────────────────────────────────────────────────
 
     # OWNER commands
     if chat_id == OWNER_ID and text.strip().startswith("-"):
@@ -283,22 +280,74 @@ def webhook():
 
         interval, display_time = interval_map[command]
 
-        # Album detection
+        # ────────────────────────────── ALBUM CASE ──────────────────────────────
         if "media_group_id" in replied_msg:
             mgid = replied_msg["media_group_id"]
-            album_msgs = media_groups.get((chat_id, mgid), [replied_msg["message_id"]])
-            job_ref = {"message_ids": album_msgs, "running": True, "interval": interval, "is_album": True}
-            repeat_jobs.setdefault(chat_id, []).append(job_ref)
-            threading.Thread(target=repeater, args=(chat_id, album_msgs, interval, job_ref, True), daemon=True).start()
-            send_message(chat_id, f"✅ Started repeating album every {display_time}.")
+            original_album_ids = media_groups.get((chat_id, mgid), [replied_msg["message_id"]])
+
+            # Step 1: Create one fresh copy of the album (best chance for correct grouping + caption)
+            try:
+                resp = requests.post(f"{BOT_API}/copyMessages", json={
+                    "chat_id": chat_id,
+                    "from_chat_id": chat_id,
+                    "message_ids": original_album_ids
+                }).json()
+
+                if not resp.get("ok") or len(resp.get("result", [])) != len(original_album_ids):
+                    send_message(chat_id, "❌ Failed to prepare album for repeating.\nTry again or repeat as single messages.")
+                    return "OK"
+
+                fresh_ids = [m["message_id"] for m in resp["result"]]
+
+                # Step 2: Delete the temporary fresh copy immediately
+                for mid in fresh_ids:
+                    delete_message(chat_id, mid)
+
+                # Step 3: Store fresh IDs for future repeating
+                if chat_id not in fresh_album_copies:
+                    fresh_album_copies[chat_id] = {}
+                fresh_album_copies[chat_id][mgid] = fresh_ids
+
+                # Prepare repeating job
+                job_ref = {
+                    "message_ids": fresh_ids,
+                    "original_mgid": mgid,
+                    "running": True,
+                    "interval": interval,
+                    "is_album": True
+                }
+
+                repeat_jobs.setdefault(chat_id, []).append(job_ref)
+                threading.Thread(
+                    target=repeater,
+                    args=(chat_id, fresh_ids, interval, job_ref, True),
+                    daemon=True
+                ).start()
+
+                send_message(chat_id, f"✅ Started repeating **album** every {display_time} (improved stability)")
+
+            except Exception as e:
+                send_message(chat_id, f"Error preparing album: {str(e)}")
+                return "OK"
+
+        # ────────────────────────────── SINGLE MESSAGE ──────────────────────────────
         else:
-            # Single message
             message_id_to_repeat = replied_msg["message_id"]
-            job_ref = {"message_ids": [message_id_to_repeat], "running": True, "interval": interval, "is_album": False}
+            job_ref = {
+                "message_ids": [message_id_to_repeat],
+                "running": True,
+                "interval": interval,
+                "is_album": False
+            }
             repeat_jobs.setdefault(chat_id, []).append(job_ref)
-            threading.Thread(target=repeater, args=(chat_id, [message_id_to_repeat], interval, job_ref, False), daemon=True).start()
+            threading.Thread(
+                target=repeater,
+                args=(chat_id, [message_id_to_repeat], interval, job_ref, False),
+                daemon=True
+            ).start()
             send_message(chat_id, f"✅ Started repeating every {display_time}.")
 
+    # Stop repeating
     elif text.startswith("/stop"):
         if not is_admin:
             send_message(chat_id, "Only admins can use this command.")
@@ -307,8 +356,13 @@ def webhook():
         if chat_id in repeat_jobs:
             for job in repeat_jobs[chat_id]:
                 job["running"] = False
+
+            # Optional cleanup
+            if chat_id in fresh_album_copies:
+                del fresh_album_copies[chat_id]
+
             repeat_jobs[chat_id] = []
-            send_message(chat_id, "🛑 Stopped all repeating messages.")
+            send_message(chat_id, "🛑 Stopped all repeating messages in this chat.")
 
     return "OK"
 
@@ -318,31 +372,41 @@ def index():
     return "Bot is running!"
 
 
-# -------------------- UPDATED REPEATER (supports albums) -------------------- #
+# -------------------- REPEATER (uses fresh IDs for albums) -------------------- #
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
-    last_message_ids = []
+    last_message_ids = []  # IDs of previously sent repeated copies
+
     while job_ref["running"]:
-        # delete previous repeated messages
+        # Delete previous repeated messages
         for mid in last_message_ids:
             delete_message(chat_id, mid)
         last_message_ids = []
 
-        if is_album:
-            resp = requests.post(f"{BOT_API}/copyMessages", json={
-                "chat_id": chat_id,
-                "from_chat_id": chat_id,
-                "message_ids": message_ids
-            })
-            if resp.status_code == 200 and resp.json().get("ok"):
-                last_message_ids = [m["message_id"] for m in resp.json()["result"]]
-        else:
-            resp = requests.post(f"{BOT_API}/copyMessage", json={
-                "chat_id": chat_id,
-                "from_chat_id": chat_id,
-                "message_id": message_ids[0]
-            })
-            if resp.status_code == 200:
-                last_message_ids = [resp.json()["result"]["message_id"]]
+        try:
+            if is_album:
+                resp = requests.post(f"{BOT_API}/copyMessages", json={
+                    "chat_id": chat_id,
+                    "from_chat_id": chat_id,
+                    "message_ids": message_ids   # fresh, reliable IDs
+                }).json()
+
+                if resp.get("ok"):
+                    last_message_ids = [m["message_id"] for m in resp["result"]]
+                else:
+                    print(f"Album repeat failed in {chat_id}: {resp.get('description', 'Unknown error')}")
+            else:
+                # single message
+                resp = requests.post(f"{BOT_API}/copyMessage", json={
+                    "chat_id": chat_id,
+                    "from_chat_id": chat_id,
+                    "message_id": message_ids[0]
+                }).json()
+
+                if resp.get("ok"):
+                    last_message_ids = [resp["result"]["message_id"]]
+
+        except Exception as e:
+            print(f"Repeat error in {chat_id}: {e}")
 
         time.sleep(interval)
 
