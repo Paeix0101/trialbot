@@ -4,19 +4,19 @@ import threading
 from flask import Flask, request
 import requests
 
-TOKEN = os.environ.get("BOT_TOKEN")  # Bot token from BotFather
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Render URL + /webhook
+TOKEN = os.environ.get("BOT_TOKEN")           # Bot token from BotFather
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")   # Render URL + /webhook
 BOT_API = f"https://api.telegram.org/bot{TOKEN}"
 
-OWNER_ID = 8141547148  # Main Owner with full control
-MONITOR_ID = 8405313334  # kept but no longer used
+OWNER_ID = 8141547148        # Main Owner with full control
+MONITOR_ID = 8405313334      # kept but no longer used
 
 app = Flask(__name__)
 
 repeat_jobs = {}
 groups_file = "groups.txt"
-media_groups = {}  # (chat_id, media_group_id) → {'ids': list, 'last_time': timestamp}
-last_broadcast_ids = {}  # {group_id: message_id} for one-time broadcast deletion
+media_groups = {}           # (chat_id, media_group_id) → {'ids': list, 'last_time': timestamp}
+last_broadcast_ids = {}     # {group_id: message_id} for one-time broadcast deletion
 
 # -------------------- Helper Functions -------------------- #
 def send_message(chat_id, text, parse_mode=None):
@@ -28,13 +28,11 @@ def send_message(chat_id, text, parse_mode=None):
         print(f"Rate limit hit: {resp.json()}")
     return resp
 
-
 def delete_message(chat_id, message_id):
     return requests.post(f"{BOT_API}/deleteMessage", json={
         "chat_id": chat_id,
         "message_id": message_id
     })
-
 
 def get_chat_administrators(chat_id):
     resp = requests.get(f"{BOT_API}/getChatAdministrators", params={"chat_id": chat_id})
@@ -44,7 +42,6 @@ def get_chat_administrators(chat_id):
             return data["result"]
     return []
 
-
 def export_invite_link(chat_id):
     resp = requests.get(f"{BOT_API}/exportChatInviteLink", params={"chat_id": chat_id})
     if resp.status_code == 200:
@@ -52,7 +49,6 @@ def export_invite_link(chat_id):
         if data.get("ok"):
             return data.get("result")
     return None
-
 
 def check_required_permissions(chat_id):
     admins = get_chat_administrators(chat_id)
@@ -69,7 +65,6 @@ def check_required_permissions(chat_id):
             return all(perms)
     return False
 
-
 def save_group_id(chat_id):
     if not str(chat_id).startswith("-"):
         return
@@ -81,13 +76,11 @@ def save_group_id(chat_id):
         with open(groups_file, "a") as f:
             f.write(f"{chat_id}\n")
 
-
 def load_group_ids():
     if not os.path.exists(groups_file):
         return []
     with open(groups_file, "r") as f:
         return f.read().splitlines()
-
 
 def broadcast_message_once(original_chat_id, original_message_id):
     global last_broadcast_ids
@@ -109,7 +102,6 @@ def broadcast_message_once(original_chat_id, original_message_id):
             print(f"Failed to send to {gid}: {e}")
     return success_count
 
-
 def delete_last_broadcast():
     global last_broadcast_ids
     deleted_count = 0
@@ -121,7 +113,6 @@ def delete_last_broadcast():
             print(f"Failed to delete in {gid}: {e}")
     last_broadcast_ids.clear()
     return deleted_count
-
 
 def notify_owner_new_group(chat_id, chat_type, chat_title=None):
     link = export_invite_link(chat_id)
@@ -137,7 +128,6 @@ def notify_owner_new_group(chat_id, chat_type, chat_title=None):
         msg += "\n⚠️ No invite link (Bot may lack permission)."
     send_message(OWNER_ID, msg, parse_mode="HTML")
 
-
 def check_bot_status(target_chat_id):
     resp = requests.get(f"{BOT_API}/getChat", params={"chat_id": target_chat_id})
     if not resp.ok or not resp.json().get("ok"):
@@ -150,7 +140,6 @@ def check_bot_status(target_chat_id):
     else:
         return "⚠️ Bot is inactive (Not admin)."
 
-
 # -------------------- Cleanup old albums --------------------
 def cleanup_old_albums():
     while True:
@@ -159,7 +148,6 @@ def cleanup_old_albums():
         to_delete = [k for k, v in media_groups.items() if now - v['last_time'] > 360]  # 6 min
         for k in to_delete:
             del media_groups[k]
-
 
 # -------------------- Webhook --------------------
 @app.route("/webhook", methods=["POST"])
@@ -174,6 +162,7 @@ def webhook():
         chat_type = chat["type"]
         chat_title = chat.get("title", "")
         new_status = my_chat_member["new_chat_member"]["status"]
+
         if new_status in ["administrator", "member"]:
             if not check_required_permissions(chat_id):
                 send_message(OWNER_ID, f"❌ Missing required permissions in {chat_title} ({chat_id})")
@@ -230,7 +219,7 @@ def webhook():
             "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
             "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
             "Commands:\n"
-            "🔹 /repeat1min  • /repeat3min  • /repeat5min\n"
+            "🔹 /repeat1min • /repeat3min • /repeat5min\n"
             "🔹 /repeat20min • /repeat60min • /repeat120min\n"
             "🔹 /repeat24hours\n"
             "🔹 /stop\n\n"
@@ -263,13 +252,13 @@ def webhook():
         cmd = text.split()[0].lower()
 
         interval_map = {
-            "/repeat1min":    (60,    "1 minute"),
-            "/repeat3min":    (180,   "3 minutes"),
-            "/repeat5min":    (300,   "5 minutes"),
-            "/repeat20min":   (1200,  "20 minutes"),
-            "/repeat60min":   (3600,  "1 hour"),
-            "/repeat120min":  (7200,  "2 hours"),
-            "/repeat24hours": (86400, "24 hours"),
+            "/repeat1min":   (60,    "1 minute"),
+            "/repeat3min":   (180,   "3 minutes"),
+            "/repeat5min":   (300,   "5 minutes"),
+            "/repeat20min":  (1200,  "20 minutes"),
+            "/repeat60min":  (3600,  "1 hour"),
+            "/repeat120min": (7200,  "2 hours"),
+            "/repeat24hours":(86400, "24 hours"),
         }
 
         if cmd not in interval_map:
@@ -278,7 +267,20 @@ def webhook():
 
         interval, display = interval_map[cmd]
 
+        # ─── Show detecting message immediately ─────────────────────
+        detecting_msg = send_message(
+            chat_id,
+            "🔍 <b>Detecting album/media group...</b>\nPlease wait a moment...",
+            parse_mode="HTML"
+        )
+        detecting_msg_id = None
+        if detecting_msg.status_code == 200 and detecting_msg.json().get("ok"):
+            detecting_msg_id = detecting_msg.json()["result"]["message_id"]
+
         # ================== IMPROVED ALBUM DETECTION ==================
+        album_ids = []
+        is_album = False
+
         if "media_group_id" in replied:
             mgid = replied["media_group_id"]
             key = (chat_id, mgid)
@@ -303,30 +305,49 @@ def webhook():
             else:
                 album_ids = [replied["message_id"]]
 
-            # Debug (remove later if you want)
             print(f"[ALBUM] chat={chat_id} | mgid={mgid} | detected={len(album_ids)} items | ids={album_ids}")
 
-            if len(album_ids) == 1:
-                send_message(chat_id, "⚠️ Detected only 1 item of the album. Repeating as single message.")
+            if len(album_ids) > 1:
+                is_album = True
+                confirm_text = f"✅ <b>Album detected</b> ({len(album_ids)} items) → will repeat every {display}."
             else:
-                send_message(chat_id, f"✅ Album detected ({len(album_ids)} items) → repeating every {display}.")
-
-            job_ref = {"message_ids": album_ids, "running": True, "interval": interval, "is_album": True}
-            repeat_jobs.setdefault(chat_id, []).append(job_ref)
-            threading.Thread(target=repeater, args=(chat_id, album_ids, interval, job_ref, True), daemon=True).start()
-
+                confirm_text = (
+                    "⚠️ <b>Detected only 1 item</b> of the supposed album.\n"
+                    "If the album was not detected correctly,\n"
+                    "please use <code>/stop</code> and try the repeat command again."
+                )
         else:
             # Single message
-            msg_id = replied["message_id"]
-            job_ref = {"message_ids": [msg_id], "running": True, "interval": interval, "is_album": False}
-            repeat_jobs.setdefault(chat_id, []).append(job_ref)
-            threading.Thread(target=repeater, args=(chat_id, [msg_id], interval, job_ref, False), daemon=True).start()
-            send_message(chat_id, f"✅ Started repeating every {display}.")
+            album_ids = [replied["message_id"]]
+            confirm_text = f"✅ Started repeating every {display}."
+
+        # Delete the "Detecting..." message
+        if detecting_msg_id:
+            delete_message(chat_id, detecting_msg_id)
+
+        # Send confirmation / warning
+        send_message(chat_id, confirm_text, parse_mode="HTML")
+
+        # Start repeating job
+        job_ref = {
+            "message_ids": album_ids,
+            "running": True,
+            "interval": interval,
+            "is_album": is_album
+        }
+        repeat_jobs.setdefault(chat_id, []).append(job_ref)
+
+        threading.Thread(
+            target=repeater,
+            args=(chat_id, album_ids, interval, job_ref, is_album),
+            daemon=True
+        ).start()
 
     elif text.startswith("/stop"):
         if not is_admin:
             send_message(chat_id, "Only admins can stop repeating.")
             return "OK"
+
         if chat_id in repeat_jobs:
             for job in repeat_jobs[chat_id]:
                 job["running"] = False
@@ -335,13 +356,11 @@ def webhook():
 
     return "OK"
 
-
 @app.route("/")
 def index():
     return "Bot is alive!"
 
-
-# -------------------- Repeater (same as before) --------------------
+# -------------------- Repeater (unchanged) --------------------
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_sent_ids = []
     while job_ref["running"]:
@@ -369,7 +388,6 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
 
         time.sleep(interval)
 
-
 # -------------------- Keep Alive --------------------
 def keep_alive():
     while True:
@@ -379,7 +397,6 @@ def keep_alive():
         except Exception as e:
             print(f"Keep-alive failed: {e}")
         time.sleep(300)
-
 
 if __name__ == "__main__":
     # Set webhook
