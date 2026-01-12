@@ -19,17 +19,24 @@ media_groups = {}           # (chat_id, media_group_id) → {'ids': list, 'last_
 last_broadcast_ids = {}     # {group_id: message_id} for one-time broadcast deletion
 
 # -------------------- Helper Functions -------------------- #
-def send_message(chat_id, text, parse_mode=None):
-    payload = {"chat_id": chat_id, "text": text}
+def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None):
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+    }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
     resp = requests.post(f"{BOT_API}/sendMessage", json=payload)
     if resp.status_code == 429:
         print(f"Rate limit hit: {resp.json()}")
     return resp
 
 def delete_message(chat_id, message_id):
-    return requests.post(f"{BOT_API}/deleteMessage", json={
+    if not message_id:
+        return
+    requests.post(f"{BOT_API}/deleteMessage", json={
         "chat_id": chat_id,
         "message_id": message_id
     })
@@ -44,10 +51,8 @@ def get_chat_administrators(chat_id):
 
 def export_invite_link(chat_id):
     resp = requests.get(f"{BOT_API}/exportChatInviteLink", params={"chat_id": chat_id})
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get("ok"):
-            return data.get("result")
+    if resp.status_code == 200 and resp.json().get("ok"):
+        return resp.json().get("result")
     return None
 
 def check_required_permissions(chat_id):
@@ -177,12 +182,13 @@ def webhook():
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "") or msg.get("caption", "")
     from_user = msg.get("from", {"id": None})
+    message_id = msg.get("message_id")
 
     if str(chat_id).startswith("-"):
         save_group_id(chat_id)
 
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
-    is_admin = from_user["id"] in admins if from_user.get("id") else True
+    is_admin = from_user.get("id") in admins if from_user.get("id") else True
 
     # ─── Album collection ───────────────────────────────────────
     if "media_group_id" in msg:
@@ -245,7 +251,7 @@ def webhook():
     # ─── Repeat commands ────────────────────────────────────────
     if "reply_to_message" in msg and text.startswith("/repeat"):
         if not is_admin:
-            send_message(chat_id, "Only admins can use repeat commands.")
+            send_message(chat_id, "Only group admins can use repeat commands.", reply_to_message_id=message_id)
             return "OK"
 
         replied = msg["reply_to_message"]
@@ -262,22 +268,23 @@ def webhook():
         }
 
         if cmd not in interval_map:
-            send_message(chat_id, "Invalid command.\nAvailable: " + ", ".join(interval_map.keys()))
+            send_message(chat_id, "Invalid command.\nAvailable: " + ", ".join(interval_map.keys()), reply_to_message_id=message_id)
             return "OK"
 
         interval, display = interval_map[cmd]
 
-        # ─── Show detecting message immediately ─────────────────────
-        detecting_msg = send_message(
+        # ─── Send detecting message immediately ─────────────────────
+        detecting_response = send_message(
             chat_id,
-            "🔍 <b>Detecting album/media group...</b>\nPlease wait a moment...",
-            parse_mode="HTML"
+            "🔍 **Detecting media group/album...**\nPlease wait a moment.",
+            parse_mode="Markdown",
+            reply_to_message_id=message_id
         )
         detecting_msg_id = None
-        if detecting_msg.status_code == 200 and detecting_msg.json().get("ok"):
-            detecting_msg_id = detecting_msg.json()["result"]["message_id"]
+        if detecting_response.status_code == 200 and detecting_response.json().get("ok"):
+            detecting_msg_id = detecting_response.json()["result"]["message_id"]
 
-        # ================== IMPROVED ALBUM DETECTION ==================
+        # ================== ALBUM DETECTION ==================
         album_ids = []
         is_album = False
 
@@ -285,48 +292,44 @@ def webhook():
             mgid = replied["media_group_id"]
             key = (chat_id, mgid)
 
-            # Dynamic waiting for album completion
             waited = 0
             max_wait = 4.5
             step = 0.35
 
             while waited < max_wait:
                 if key in media_groups:
-                    current_count = len(media_groups[key]['ids'])
-                    if current_count > 1:  # already have more than one → good chance it's complete
+                    if len(media_groups[key]['ids']) > 1:
                         break
                 time.sleep(step)
                 waited += step
-                step = min(step + 0.15, 0.8)  # progressive slowing
+                step = min(step + 0.15, 0.8)
 
-            # Final collection
             if key in media_groups:
                 album_ids = sorted(media_groups[key]['ids'])
             else:
                 album_ids = [replied["message_id"]]
 
-            print(f"[ALBUM] chat={chat_id} | mgid={mgid} | detected={len(album_ids)} items | ids={album_ids}")
+            print(f"[ALBUM DETECT] chat={chat_id} | mgid={mgid} | items={len(album_ids)} | ids={album_ids}")
 
             if len(album_ids) > 1:
                 is_album = True
-                confirm_text = f"✅ <b>Album detected</b> ({len(album_ids)} items) → will repeat every {display}."
+                result_text = f"**✓ Album detected** ({len(album_ids)} items)\nWill repeat every {display}."
             else:
-                confirm_text = (
-                    "⚠️ <b>Detected only 1 item</b> of the supposed album.\n"
-                    "If the album was not detected correctly,\n"
-                    "please use <code>/stop</code> and try the repeat command again."
+                result_text = (
+                    "**⚠️ Only single message detected**\n"
+                    "If this was supposed to be an album,\n"
+                    "please use /stop and try the command again."
                 )
         else:
-            # Single message
             album_ids = [replied["message_id"]]
-            confirm_text = f"✅ Started repeating every {display}."
+            result_text = f"**✓ Repeating started**\nInterval: every {display}"
 
-        # Delete the "Detecting..." message
+        # Delete detecting message
         if detecting_msg_id:
             delete_message(chat_id, detecting_msg_id)
 
-        # Send confirmation / warning
-        send_message(chat_id, confirm_text, parse_mode="HTML")
+        # Send final result
+        send_message(chat_id, result_text, parse_mode="Markdown", reply_to_message_id=message_id)
 
         # Start repeating job
         job_ref = {
@@ -345,14 +348,16 @@ def webhook():
 
     elif text.startswith("/stop"):
         if not is_admin:
-            send_message(chat_id, "Only admins can stop repeating.")
+            send_message(chat_id, "Only group admins can stop repeating.", reply_to_message_id=message_id)
             return "OK"
 
-        if chat_id in repeat_jobs:
+        if chat_id in repeat_jobs and repeat_jobs[chat_id]:
             for job in repeat_jobs[chat_id]:
                 job["running"] = False
             repeat_jobs[chat_id] = []
-            send_message(chat_id, "🛑 All repeating stopped.")
+            send_message(chat_id, "🛑 **All repeating tasks stopped**", reply_to_message_id=message_id)
+        else:
+            send_message(chat_id, "No active repeating tasks found.", reply_to_message_id=message_id)
 
     return "OK"
 
@@ -360,11 +365,11 @@ def webhook():
 def index():
     return "Bot is alive!"
 
-# -------------------- Repeater (unchanged) --------------------
+# -------------------- Repeater --------------------
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_sent_ids = []
     while job_ref["running"]:
-        # Delete previous cycle
+        # Delete previous messages
         for mid in last_sent_ids:
             delete_message(chat_id, mid)
         last_sent_ids = []
