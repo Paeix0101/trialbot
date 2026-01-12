@@ -221,15 +221,22 @@ def webhook():
     # /start
     if text.strip().lower() == "/start":
         start_msg = (
-            "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
+       "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
             "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
             "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
-            "Commands:\n"
-            "🔹 /repeat1min • /repeat3min • /repeat5min\n"
-            "🔹 /repeat20min • /repeat60min • /repeat120min\n"
-            "🔹 /repeat24hours\n"
-            "🔹 /stop\n\n"
-            "⚠️ Only <b>admins</b> can use these commands."
+            "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) "
+            "in various intervals.\n\n"
+            "📌It also deletes the last repeated message(s) before sending new one(s).\n\n"
+            "🛠 <b>Commands:</b>\n\n"
+            "🔹 /repeat1min - Repeat every 1 minute\n"
+            "🔹 /repeat3min - Repeat every 3 minutes\n"
+            "🔹 /repeat5min - Repeat every 5 minutes\n"
+            "🔹 /repeat20min - Repeat every 20 minutes\n"
+            "🔹 /repeat60min - Repeat every 60 minutes (1 hour)\n"
+            "🔹 /repeat120min - Repeat every 120 minutes (2 hours)\n"
+            "🔹 /repeat24hours - Repeat every 24 hours\n"
+            "🔹 /stop - Stop all repeating messages\n\n"
+            "⚠️ Only <b>admins</b> can control this bot."
         )
         send_message(chat_id, start_msg, parse_mode="HTML")
         return "OK"
@@ -318,7 +325,7 @@ def webhook():
                 result_text = (
                     "**⚠️ Only single message detected**\n"
                     "If this was supposed to be an album,\n"
-                    "please use /stop and try the command again."
+                    "please use /stop send album again in group / channel and try the repeat command again."
                 )
         else:
             album_ids = [replied["message_id"]]
@@ -355,7 +362,7 @@ def webhook():
             for job in repeat_jobs[chat_id]:
                 job["running"] = False
             repeat_jobs[chat_id] = []
-            send_message(chat_id, "🛑 **All repeating tasks stopped**", reply_to_message_id=message_id)
+            send_message(chat_id, "🛑 All repeating tasks stopped", reply_to_message_id=message_id)
         else:
             send_message(chat_id, "No active repeating tasks found.", reply_to_message_id=message_id)
 
