@@ -13,6 +13,9 @@ MONITOR_ID = 8405313334      # kept but no longer used
 
 app = Flask(__name__)
 
+bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
+BOT_USERNAME = bot_info["username"]
+
 repeat_jobs = {}
 groups_file = "groups.txt"
 media_groups = {}           # (chat_id, media_group_id) → {'ids': list, 'last_time': timestamp}
@@ -42,16 +45,6 @@ def delete_message(chat_id, message_id):
         "chat_id": chat_id,
         "message_id": message_id
     })
-
-def answer_callback_query(callback_query_id, text=None, show_alert=False):
-    payload = {
-        "callback_query_id": callback_query_id,
-    }
-    if text:
-        payload["text"] = text
-    if show_alert:
-        payload["show_alert"] = show_alert
-    requests.post(f"{BOT_API}/answerCallbackQuery", json=payload)
 
 def get_chat_administrators(chat_id):
     resp = requests.get(f"{BOT_API}/getChatAdministrators", params={"chat_id": chat_id})
@@ -171,37 +164,6 @@ def cleanup_old_albums():
 def webhook():
     update = request.get_json()
 
-    # Handle callback from inline button
-    if "callback_query" in update:
-        callback = update["callback_query"]
-        query_id = callback["id"]
-        data = callback.get("data", "")
-        user = callback["from"]
-        chat_id = callback["message"]["chat"]["id"] if "message" in callback else None
-        message_id = callback["message"]["message_id"] if "message" in callback else None
-
-        if data == "verify_user":
-            # Send verification info in private
-            username = user.get("username", "No username")
-            first_name = user.get("first_name", "User")
-            user_id = user["id"]
-
-            verify_text = (
-                "✅ <b>Verification Successful</b>\n\n"
-                f"• User ID: <code>{user_id}</code>\n"
-                f"• Name: {first_name}\n"
-                f"• Username: @{username}\n\n"
-                "Status: <b>Verified</b> ✅"
-            )
-
-            send_message(user_id, verify_text, parse_mode="HTML")
-            answer_callback_query(query_id, text="Verification info sent in private!", show_alert=False)
-
-            # Optional: edit or delete the welcome message in group
-            # delete_message(chat_id, message_id)
-
-        return "OK"
-
     # Handle my_chat_member (bot status change)
     my_chat_member = update.get("my_chat_member")
     if my_chat_member:
@@ -253,17 +215,17 @@ def webhook():
                 first_name = user.get("first_name", "New Member")
 
                 welcome_text = (
-                    f"**Welcome to {chat_title}!**\n\n"
-                    f"👤 {first_name} has joined the group\n\n"
+                    f"Welcome to <b>{chat_title}</b>!<br><br>"
+                    f"👤 <a href=\"tg://user?id={user_id}\">{first_name}</a> has joined the group<br><br>"
                     "Please verify yourself using the button below 👇"
                 )
 
-                # Inline keyboard with Verify button
+                # Inline keyboard with Verify button linking to PM
                 keyboard = {
                     "inline_keyboard": [[
                         {
                             "text": "Verify",
-                            "callback_data": "verify_user"
+                            "url": f"https://t.me/{BOT_USERNAME}?start=verify"
                         }
                     ]]
                 }
@@ -271,29 +233,10 @@ def webhook():
                 send_message(
                     chat_id,
                     welcome_text,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=keyboard
                 )
 
-        return "OK"
-
-    # ─── /verify command (alternative way) ─────────────────────────
-    if text.strip() == "/verify":
-        user = from_user
-        username = user.get("username", "No username")
-        first_name = user.get("first_name", "User")
-        user_id = user["id"]
-
-        verify_text = (
-            "✅ <b>Verification Info</b>\n\n"
-            f"• User ID: <code>{user_id}</code>\n"
-            f"• Name: {first_name}\n"
-            f"• Username: @{username}\n\n"
-            "Status: <b>Verified</b> ✅"
-        )
-
-        send_message(user_id, verify_text, parse_mode="HTML")
-        send_message(chat_id, "Verification information sent to you in private.", reply_to_message_id=message_id)
         return "OK"
 
     # ─── Album collection ───────────────────────────────────────
@@ -324,28 +267,43 @@ def webhook():
             send_message(chat_id, "❌ Failed to get invite link.")
         return "OK"
 
-    # /start
-    if text.strip().lower() == "/start":
-        start_msg = (
-            "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
-            "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
-            "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
-            "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) "
-            "in various intervals.\n\n"
-            "📌It also deletes the last repeated message(s) before sending new one(s).\n\n"
-            "🛠 <b>Commands:</b>\n\n"
-            "🔹 /repeat1min - Repeat every 1 minute\n"
-            "🔹 /repeat3min - Repeat every 3 minutes\n"
-            "🔹 /repeat5min - Repeat every 5 minutes\n"
-            "🔹 /repeat20min - Repeat every 20 minutes\n"
-            "🔹 /repeat60min - Repeat every 60 minutes (1 hour)\n"
-            "🔹 /repeat120min - Repeat every 120 minutes (2 hours)\n"
-            "🔹 /repeat24hours - Repeat every 24 hours\n"
-            "🔹 /stop - Stop all repeating messages\n\n"
-            "⚠️ Only <b>admins</b> can control this bot."
-        )
-        send_message(chat_id, start_msg, parse_mode="HTML")
-        return "OK"
+    # /start handling with parameters
+    if text.startswith("/start"):
+        parts = text.split()
+        username = from_user.get("username", "No username")
+        first_name = from_user.get("first_name", "User")
+        user_id = from_user["id"]
+        if len(parts) > 1 and parts[1] == "verify":
+            verify_text = (
+                "✅ <b>Verification Successful</b>\n\n"
+                f"• User ID: <code>{user_id}</code>\n"
+                f"• Name: {first_name}\n"
+                f"• Username: @{username}\n\n"
+                "Status: <b>Verified</b> ✅"
+            )
+            send_message(chat_id, verify_text, parse_mode="HTML")
+            return "OK"
+        else:
+            start_msg = (
+                "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
+                "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
+                "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
+                "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) "
+                "in various intervals.\n\n"
+                "📌It also deletes the last repeated message(s) before sending new one(s).\n\n"
+                "🛠 <b>Commands:</b>\n\n"
+                "🔹 /repeat1min - Repeat every 1 minute\n"
+                "🔹 /repeat3min - Repeat every 3 minutes\n"
+                "🔹 /repeat5min - Repeat every 5 minutes\n"
+                "🔹 /repeat20min - Repeat every 20 minutes\n"
+                "🔹 /repeat60min - Repeat every 60 minutes (1 hour)\n"
+                "🔹 /repeat120min - Repeat every 120 minutes (2 hours)\n"
+                "🔹 /repeat24hours - Repeat every 24 hours\n"
+                "🔹 /stop - Stop all repeating messages\n\n"
+                "⚠️ Only <b>admins</b> can control this bot."
+            )
+            send_message(chat_id, start_msg, parse_mode="HTML")
+            return "OK"
 
     # One-time broadcast
     if chat_id == OWNER_ID and text.startswith("/lemonchus"):
