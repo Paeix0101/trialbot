@@ -300,9 +300,7 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
 
-    # ───────────────────────────────────────────────
-    #   NEW FEATURE: Welcome new members + verify button
-    # ───────────────────────────────────────────────
+    # Welcome new members + verify button
     if "new_chat_members" in msg and str(chat_id).startswith("-100"):  # supergroup
         new_members = msg["new_chat_members"]
         bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
@@ -340,7 +338,6 @@ def webhook():
 
             if resp.status_code == 200 and resp.json().get("ok"):
                 sent_msg_id = resp.json()["result"]["message_id"]
-                # Delete after 60 seconds
                 threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
 
     # Album / media group collection
@@ -381,13 +378,12 @@ def webhook():
             "in various intervals.\n\n"
             "📌It also deletes the last repeated message(s) before sending new one(s).\n\n"
             "🛠 <b>Commands:</b>\n\n"
-            "🔹 /repeat1min - Repeat every 1 minute\n"
-            "🔹 /repeat3min - Repeat every 3 minutes\n"
+            "🔹 /repeat2min - Repeat every 2 minutes\n"
             "🔹 /repeat5min - Repeat every 5 minutes\n"
             "🔹 /repeat20min - Repeat every 20 minutes\n"
             "🔹 /repeat60min - Repeat every 60 minutes (1 hour)\n"
             "🔹 /repeat120min - Repeat every 120 minutes (2 hours)\n"
-            "🔹 /repeat24hours - Repeat every 24 hours\n"
+            "🔹 /repeat24hour - Repeat every 24 hours\n"
             "🔹 /stop - Stop all repeating messages\n\n"
             "⚠️ Only <b>admins</b> can control this bot."
         )
@@ -417,13 +413,12 @@ def webhook():
         replied = msg["reply_to_message"]
         cmd = text.split()[0].lower()
         interval_map = {
-            "/repeat1min":   (60,     "1 minute"),
-            "/repeat3min":   (180,    "3 minutes"),
+            "/repeat2min":   (120,    "2 minutes"),
             "/repeat5min":   (300,    "5 minutes"),
             "/repeat20min":  (1200,   "20 minutes"),
             "/repeat60min":  (3600,   "1 hour"),
             "/repeat120min": (7200,   "2 hours"),
-            "/repeat24hours":(86400,  "24 hours"),
+            "/repeat24hour": (86400,  "24 hours"),
         }
 
         if cmd not in interval_map:
