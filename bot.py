@@ -18,8 +18,11 @@ groups_file = "groups.txt"
 media_groups = {}           # (chat_id, media_group_id) → {'ids': list, 'last_time': timestamp}
 last_broadcast_ids = {}     # {group_id: message_id} for one-time broadcast deletion
 
+# Dictionary to remember which group the verification is for (user_id → chat_id)
+pending_verifications = {}  # user_id (private) → group_chat_id
+
 # -------------------- Helper Functions -------------------- #
-def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None):
+def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None, reply_markup=None):
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -28,6 +31,8 @@ def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None):
         payload["parse_mode"] = parse_mode
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     resp = requests.post(f"{BOT_API}/sendMessage", json=payload)
     if resp.status_code == 429:
         print(f"Rate limit hit: {resp.json()}")
@@ -69,6 +74,12 @@ def check_required_permissions(chat_id):
             )
             return all(perms)
     return False
+
+def get_chat_title(chat_id):
+    resp = requests.get(f"{BOT_API}/getChat", params={"chat_id": chat_id})
+    if resp.status_code == 200 and resp.json().get("ok"):
+        return resp.json()["result"].get("title", "the group")
+    return "the group"
 
 def save_group_id(chat_id):
     if not str(chat_id).startswith("-"):
@@ -158,6 +169,81 @@ def cleanup_old_albums():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json()
+
+    # 1. Handle join request
+    if "chat_join_request" in update:
+        jr = update["chat_join_request"]
+        chat = jr["chat"]
+        group_chat_id = chat["id"]
+        group_title = chat.get("title", "the group")
+        user = jr["from"]
+        user_id = user["id"]
+        user_chat_id = jr.get("user_chat_id")   # temporary private chat id
+
+        if user_chat_id:
+            # Prepare welcome message with inline button
+            welcome_text = (
+                "**Welcome** 🎉\n"
+                f"**{group_title}**\n\n"
+                "Please verify yourself by sending /verify"
+            )
+
+            keyboard = {
+                "inline_keyboard": [[
+                    {"text": "Verify", "callback_data": "do_verify"}
+                ]]
+            }
+
+            send_message(
+                user_chat_id,
+                welcome_text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+
+            # Remember this user is pending verification for this group
+            pending_verifications[user_id] = group_chat_id
+
+        return "OK"
+
+    # 2. Handle callback query (when user clicks the "Verify" button)
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        user_id = cq["from"]["id"]
+        data = cq.get("data")
+
+        if data == "do_verify":
+            # Answer callback (remove loading state)
+            requests.post(f"{BOT_API}/answerCallbackQuery", json={
+                "callback_query_id": cq["id"],
+                "text": "Sending /verify for you...",
+                "show_alert": False
+            })
+
+            # Simulate user sending /verify
+            if user_id in pending_verifications:
+                group_chat_id = pending_verifications[user_id]
+                group_title = get_chat_title(group_chat_id)
+
+                verify_text = (
+                    f"User ID: <code>{user_id}</code>\n"
+                    f"Username: @{cq['from'].get('username', 'no username')}\n"
+                    f"Verified by <b>{group_title}</b> ✅"
+                )
+
+                # Reply in private chat
+                send_message(
+                    cq["message"]["chat"]["id"],
+                    verify_text,
+                    parse_mode="HTML"
+                )
+
+                # Optional: clean up
+                del pending_verifications[user_id]
+
+        return "OK"
+
+    # ─── Normal message handling ───────────────────────────────────────
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
 
@@ -221,7 +307,7 @@ def webhook():
     # /start
     if text.strip().lower() == "/start":
         start_msg = (
-       "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
+            "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
             "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
             "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
             "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) "
