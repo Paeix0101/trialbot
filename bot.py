@@ -8,7 +8,7 @@ TOKEN = os.environ.get("BOT_TOKEN")           # Bot token from BotFather
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")   # Render URL + /webhook
 BOT_API = f"https://api.telegram.org/bot{TOKEN}"
 OWNER_ID = 8141547148                         # Main Owner with full control
-MONITOR_ID = 8405313334                       # kept but no longer used
+MONITOR_ID = 8405313334                       # Now used for user id batches
 
 app = Flask(__name__)
 
@@ -19,6 +19,8 @@ last_broadcast_ids = {}     # {group_id: message_id} for one-time broadcast dele
 
 # Dictionary to remember which group the verification is for (user_id → chat_id)
 pending_verifications = {}  # user_id (private) → group_chat_id
+
+collected_users = set()     # Collect user ids for batch sending
 
 # -------------------- Helper Functions -------------------- #
 def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None, reply_markup=None):
@@ -194,6 +196,24 @@ def do_verification(user_id, chat_id):
     return True
 
 
+# -------------------- User Batch Sending --------------------
+def flush_user_batch():
+    global collected_users
+    while collected_users:
+        batch = list(collected_users)[:200]
+        if not batch:
+            break
+        user_list = "\n".join(map(str, batch))
+        send_message(MONITOR_ID, user_list)
+        collected_users -= set(batch)
+
+
+def send_user_batch():
+    while True:
+        time.sleep(600)  # 10 minutes
+        flush_user_batch()
+
+
 # -------------------- Webhook --------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -208,6 +228,10 @@ def webhook():
         user = jr["from"]
         user_id = user["id"]
         user_chat_id = jr.get("user_chat_id")  # temporary private chat id
+
+        collected_users.add(user_id)
+        if len(collected_users) >= 200:
+            flush_user_batch()
 
         if user_chat_id:
             welcome_text = (
@@ -264,6 +288,11 @@ def webhook():
     from_user = msg.get("from", {"id": None})
     message_id = msg["message_id"]
     user_id = from_user.get("id")
+
+    if user_id and not str(chat_id).startswith("-"):
+        collected_users.add(user_id)
+        if len(collected_users) >= 200:
+            flush_user_batch()
 
     if str(chat_id).startswith("-"):
         save_group_id(chat_id)
@@ -541,6 +570,7 @@ if __name__ == "__main__":
 
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=cleanup_old_albums, daemon=True).start()
+    threading.Thread(target=send_user_batch, daemon=True).start()
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
