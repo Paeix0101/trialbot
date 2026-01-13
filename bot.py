@@ -8,6 +8,10 @@ TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 BOT_API = f"https://api.telegram.org/bot{TOKEN}"
 
+bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
+BOT_ID = bot_info["id"]
+BOT_USERNAME = bot_info["username"]
+
 OWNER_ID = 8141547148
 MONITOR_ID = 8405313334   # kept but no longer used
 
@@ -17,6 +21,8 @@ repeat_jobs = {}
 groups_file = "groups.txt"
 media_groups = {}
 last_broadcast_ids = {}
+unverified = set()  # set of (chat_id, user_id)
+pending_verifications = {}  # user_id: group_id
 
 # -------------------- Helper Functions -------------------- #
 def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None):
@@ -61,10 +67,8 @@ def export_invite_link(chat_id):
 
 def check_required_permissions(chat_id):
     admins = get_chat_administrators(chat_id)
-    bot_info = requests.get(f"{BOT_API}/getMe").json()
-    bot_id = bot_info["result"]["id"]
     for admin in admins:
-        if admin["user"]["id"] == bot_id:
+        if admin["user"]["id"] == BOT_ID:
             perms = (
                 admin.get("can_delete_messages", False),
                 admin.get("can_restrict_members", False),
@@ -148,9 +152,7 @@ def check_bot_status(target_chat_id):
     if not resp.ok or not resp.json().get("ok"):
         return "Bot is inactive (Chat not found or bot removed)."
     admins = get_chat_administrators(target_chat_id)
-    bot_info = requests.get(f"{BOT_API}/getMe").json()
-    bot_id = bot_info["result"]["id"]
-    if any(admin["user"]["id"] == bot_id for admin in admins):
+    if any(admin["user"]["id"] == BOT_ID for admin in admins):
         return "✅ Bot is active (Admin in the group/channel)."
     else:
         return "⚠️ Bot is inactive (Not admin)."
@@ -179,7 +181,44 @@ def get_group_title(chat_id):
     return "Group"
 
 
-def send_welcome_verify_dm(user_id, group_name):
+def restrict_user(chat_id, user_id, restrict=True):
+    permissions = {
+        "can_send_messages": not restrict,
+        "can_send_media_messages": not restrict,
+        "can_send_polls": not restrict,
+        "can_send_other_messages": not restrict,
+        "can_add_web_page_previews": not restrict,
+        "can_change_info": False,
+        "can_invite_users": False,
+        "can_pin_messages": False,
+    }
+    requests.post(f"{BOT_API}/restrictChatMember", json={
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "permissions": permissions,
+    })
+
+
+def verification_timer(chat_id, user_id, timeout=300):
+    time.sleep(timeout)
+    key = (chat_id, user_id)
+    if key in unverified:
+        unverified.remove(key)
+        # Kick the user
+        requests.post(f"{BOT_API}/banChatMember", json={
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "revoke_messages": False
+        })
+        # Unban to remove without permanent ban
+        requests.post(f"{BOT_API}/unbanChatMember", json={
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "only_if_banned": True
+        })
+
+
+def send_welcome_verify_dm(user_id, group_id, group_name):
     text = (
         "<b>Welcome!</b>\n\n"
         f"<b>{group_name}</b>\n\n"
@@ -220,14 +259,57 @@ def webhook():
                 for member in msg["new_chat_members"]:
                     uid = member["id"]
                     # Skip bot itself
-                    if str(uid) == TOKEN.split(":")[0]:
+                    if uid == BOT_ID:
                         continue
-                    # Send welcome + verify button in private
+                    # Restrict the new user
+                    restrict_user(chat_id, uid, restrict=True)
+                    # Add to unverified
+                    key = (chat_id, uid)
+                    unverified.add(key)
+                    # Start timer to kick if not verified
                     threading.Thread(
-                        target=send_welcome_verify_dm,
-                        args=(uid, group_title),
+                        target=verification_timer,
+                        args=(chat_id, uid),
                         daemon=True
                     ).start()
+                    # Send prompt in group with button to start PM
+                    user_mention = f'<a href="tg://user?id={uid}">{member.get("first_name", "User")}</a>'
+                    text = (
+                        f"Welcome {user_mention}!\n\n"
+                        f"<b>{group_title}</b>\n\n"
+                        "Please verify yourself to gain full access. Click the button below to start a private chat and complete verification."
+                    )
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                        "reply_markup": {
+                            "inline_keyboard": [[
+                                {"text": "Start Verification", "url": f"https://t.me/{BOT_USERNAME}?start=verify_{chat_id}"}
+                            ]]
+                        }
+                    }
+                    requests.post(f"{BOT_API}/sendMessage", json=payload)
+
+    # ─── Handle /start verify_ in PM ───────────────────────────────
+    if "message" in update:
+        msg = update["message"]
+        if msg["chat"]["type"] == "private":
+            text = msg.get("text", "").strip()
+            user_id = msg["from"]["id"]
+            if text.startswith("/start verify_"):
+                try:
+                    group_id = int(text.split(" ")[1][7:])
+                    pending_verifications[user_id] = group_id
+                    group_title = get_group_title(group_id)
+                    threading.Thread(
+                        target=send_welcome_verify_dm,
+                        args=(user_id, group_id, group_title),
+                        daemon=True
+                    ).start()
+                except:
+                    pass
+                return "OK"
 
     # ─── Handle /verify command and button press ───────────────────
     if "message" in update:
@@ -235,6 +317,7 @@ def webhook():
         if msg["chat"]["type"] == "private":
             text = msg.get("text", "").strip()
             user = msg["from"]
+            user_id = user["id"]
 
             if text == "/verify":
                 username = user.get("username")
@@ -247,6 +330,15 @@ def webhook():
                 ).format(user["id"], username_str)
 
                 send_message(msg["chat"]["id"], response, "HTML")
+
+                # Unrestrict if pending
+                if user_id in pending_verifications:
+                    group_id = pending_verifications[user_id]
+                    key = (group_id, user_id)
+                    if key in unverified:
+                        unverified.remove(key)
+                        restrict_user(group_id, user_id, restrict=False)
+                    del pending_verifications[user_id]
                 return "OK"
 
     if "callback_query" in update:
@@ -258,7 +350,16 @@ def webhook():
         if data.startswith("verify_"):
             try:
                 _, target_str = data.split("_", 1)
-                if int(target_str) == user_id:
+                target_user = int(target_str)
+                if target_user == user_id:
+                    # Unrestrict if pending
+                    if user_id in pending_verifications:
+                        group_id = pending_verifications[user_id]
+                        key = (group_id, user_id)
+                        if key in unverified:
+                            unverified.remove(key)
+                            restrict_user(group_id, user_id, restrict=False)
+                        del pending_verifications[user_id]
                     requests.post(f"{BOT_API}/answerCallbackQuery", json={
                         "callback_query_id": callback_id,
                         "text": "You are now verified! ✅",
