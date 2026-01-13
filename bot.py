@@ -207,14 +207,12 @@ def webhook():
                 "🔐 **Identity Verification**\n\n"
                 "Please verify yourself by sending **/verify**\n"
                 "This action confirms your Telegram ID and username.\n\n"
-                "👇 Tap the button below."
+                "👇 Tap the button below to add the bot to your group."
             )
 
+            # Only one button now — opens chat list to add bot
             keyboard = {
                 "inline_keyboard": [
-                    [
-                        {"text": "Verify Now", "callback_data": "do_verify"}
-                    ],
                     [
                         {
                             "text": "Add bot to your group",
@@ -235,25 +233,9 @@ def webhook():
 
         return "OK"
 
-    # 2. Handle callback query (Verify button clicked)
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        user_id = cq["from"]["id"]
-        data = cq.get("data")
-        private_chat_id = cq["message"]["chat"]["id"]
+    # 2. Handle callback query → removed (no more Verify button)
 
-        if data == "do_verify":
-            requests.post(f"{BOT_API}/answerCallbackQuery", json={
-                "callback_query_id": cq["id"],
-                "text": "Verifying...",
-                "show_alert": False
-            })
-
-            do_verification(user_id, private_chat_id)  # silent if no pending
-
-        return "OK"
-
-    # ─── Normal message handling ───────────────────────────────────────
+    # Normal message / channel post / my_chat_member
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
 
@@ -287,7 +269,7 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
 
-    # ─── Album collection ───────────────────────────────────────
+    # Album / media group collection
     if "media_group_id" in msg:
         mgid = msg["media_group_id"]
         key = (chat_id, mgid)
@@ -352,7 +334,7 @@ def webhook():
         send_message(chat_id, f"🗑️ Deleted from {deleted} groups." if deleted > 0 else "No previous broadcast.")
         return "OK"
 
-    # ─── Repeat commands ────────────────────────────────────────
+    # Repeat commands
     if "reply_to_message" in msg and text.startswith("/repeat"):
         if not is_admin:
             send_message(chat_id, "Only group admins can use repeat commands.", reply_to_message_id=message_id)
@@ -399,9 +381,8 @@ def webhook():
             step = 0.35
 
             while waited < max_wait:
-                if key in media_groups:
-                    if len(media_groups[key]['ids']) > 1:
-                        break
+                if key in media_groups and len(media_groups[key]['ids']) > 1:
+                    break
                 time.sleep(step)
                 waited += step
                 step = min(step + 0.15, 0.8)
@@ -420,7 +401,7 @@ def webhook():
                 result_text = (
                     "**⚠️ Only single message detected**\n"
                     "If this was supposed to be an album,\n"
-                    "please use /stop send album again in group / channel and try the repeat command again."
+                    "please use /stop send album again and try the repeat command again."
                 )
         else:
             album_ids = [replied["message_id"]]
@@ -445,11 +426,12 @@ def webhook():
             daemon=True
         ).start()
 
-    # ─── /verify command in private chat ───────────────────────────────
+    # /verify command in private chat
     elif text.strip() == "/verify" and not str(chat_id).startswith("-"):
         do_verification(user_id, chat_id)  # silent if no pending
         return "OK"
 
+    # /stop
     elif text.startswith("/stop"):
         if not is_admin:
             send_message(chat_id, "Only group admins can stop repeating.", reply_to_message_id=message_id)
