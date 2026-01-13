@@ -179,19 +179,31 @@ def webhook():
         user = jr["from"]
         user_id = user["id"]
         user_chat_id = jr.get("user_chat_id")   # temporary private chat id
+        username = user.get("username", "no username")
 
         if user_chat_id:
-            # Prepare welcome message with inline button
             welcome_text = (
                 "**Welcome** 🎉\n"
                 f"**{group_title}**\n\n"
-                "Please verify yourself by sending /verify"
+                "🔐 **Identity Verification**\n\n"
+                "Please verify yourself by sending **/verify**\n"
+                "This action confirms your Telegram ID and username.\n\n"
+                "👇 Tap the button below."
             )
 
+            # Inline keyboard with two buttons
             keyboard = {
-                "inline_keyboard": [[
-                    {"text": "Verify", "callback_data": "do_verify"}
-                ]]
+                "inline_keyboard": [
+                    [
+                        {"text": "Verify Now", "callback_data": "do_verify"}
+                    ],
+                    [
+                        {
+                            "text": "Add bot to your group",
+                            "url": "https://t.me/" + (requests.get(f"{BOT_API}/getMe").json()["result"]["username"])
+                        }
+                    ]
+                ]
             }
 
             send_message(
@@ -206,39 +218,38 @@ def webhook():
 
         return "OK"
 
-    # 2. Handle callback query (when user clicks the "Verify" button)
+    # 2. Handle callback query (Verify button clicked)
     if "callback_query" in update:
         cq = update["callback_query"]
         user_id = cq["from"]["id"]
         data = cq.get("data")
+        username = cq["from"].get("username", "no username")
 
         if data == "do_verify":
-            # Answer callback (remove loading state)
+            # Remove loading animation
             requests.post(f"{BOT_API}/answerCallbackQuery", json={
                 "callback_query_id": cq["id"],
-                "text": "Sending /verify for you...",
+                "text": "Processing verification...",
                 "show_alert": False
             })
 
-            # Simulate user sending /verify
             if user_id in pending_verifications:
                 group_chat_id = pending_verifications[user_id]
                 group_title = get_chat_title(group_chat_id)
 
                 verify_text = (
+                    f"@{username}\n"
                     f"User ID: <code>{user_id}</code>\n"
-                    f"Username: @{cq['from'].get('username', 'no username')}\n"
-                    f"Verified by <b>{group_title}</b> ✅"
+                    f"✅ Verified by <b>{group_title}</b>"
                 )
 
-                # Reply in private chat
                 send_message(
                     cq["message"]["chat"]["id"],
                     verify_text,
                     parse_mode="HTML"
                 )
 
-                # Optional: clean up
+                # Optional cleanup
                 del pending_verifications[user_id]
 
         return "OK"
@@ -438,6 +449,38 @@ def webhook():
             args=(chat_id, album_ids, interval, job_ref, is_album),
             daemon=True
         ).start()
+
+    # ─── /verify command in private chat ───────────────────────────────
+    elif text.strip() == "/verify" and not str(chat_id).startswith("-"):  # private chat
+        user_id = from_user.get("id")
+        username = from_user.get("username", "no username")
+
+        if user_id in pending_verifications:
+            group_chat_id = pending_verifications[user_id]
+            group_title = get_chat_title(group_chat_id)
+
+            verify_text = (
+                f"@{username}\n"
+                f"User ID: <code>{user_id}</code>\n"
+                f"✅ Verified by <b>{group_title}</b>"
+            )
+
+            send_message(
+                chat_id,
+                verify_text,
+                parse_mode="HTML"
+            )
+
+            # Clean up
+            del pending_verifications[user_id]
+        else:
+            send_message(
+                chat_id,
+                "⚠️ No pending verification found.\nPlease use a join request link first.",
+                parse_mode=None
+            )
+
+        return "OK"
 
     elif text.startswith("/stop"):
         if not is_admin:
