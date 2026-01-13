@@ -165,6 +165,30 @@ def cleanup_old_albums():
         for k in to_delete:
             del media_groups[k]
 
+# -------------------- Verification logic --------------------
+def do_verification(user_id, chat_id, username):
+    if user_id not in pending_verifications:
+        return False
+
+    group_chat_id = pending_verifications[user_id]
+    group_title = get_chat_title(group_chat_id)
+
+    verify_text = (
+        f"user_id - {user_id}\n"
+        f"user_name - @{username}\n"
+        f"verified by {group_title}"
+    )
+
+    send_message(
+        chat_id,
+        verify_text,
+        parse_mode=None   # plain text as requested
+    )
+
+    # Clean up
+    del pending_verifications[user_id]
+    return True
+
 # -------------------- Webhook --------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -191,7 +215,6 @@ def webhook():
                 "👇 Tap the button below."
             )
 
-            # Inline keyboard with two buttons
             keyboard = {
                 "inline_keyboard": [
                     [
@@ -213,7 +236,6 @@ def webhook():
                 reply_markup=keyboard
             )
 
-            # Remember this user is pending verification for this group
             pending_verifications[user_id] = group_chat_id
 
         return "OK"
@@ -224,33 +246,22 @@ def webhook():
         user_id = cq["from"]["id"]
         data = cq.get("data")
         username = cq["from"].get("username", "no username")
+        private_chat_id = cq["message"]["chat"]["id"]
 
         if data == "do_verify":
-            # Remove loading animation
             requests.post(f"{BOT_API}/answerCallbackQuery", json={
                 "callback_query_id": cq["id"],
-                "text": "Processing verification...",
+                "text": "Verifying...",
                 "show_alert": False
             })
 
-            if user_id in pending_verifications:
-                group_chat_id = pending_verifications[user_id]
-                group_title = get_chat_title(group_chat_id)
+            success = do_verification(user_id, private_chat_id, username)
 
-                verify_text = (
-                    f"@{username}\n"
-                    f"User ID: <code>{user_id}</code>\n"
-                    f"✅ Verified by <b>{group_title}</b>"
-                )
-
+            if not success:
                 send_message(
-                    cq["message"]["chat"]["id"],
-                    verify_text,
-                    parse_mode="HTML"
+                    private_chat_id,
+                    "⚠️ No pending verification found.\nTry joining a group again.",
                 )
-
-                # Optional cleanup
-                del pending_verifications[user_id]
 
         return "OK"
 
@@ -280,12 +291,14 @@ def webhook():
     text = msg.get("text", "") or msg.get("caption", "")
     from_user = msg.get("from", {"id": None})
     message_id = msg.get("message_id")
+    username = from_user.get("username", "no username")
+    user_id = from_user.get("id")
 
     if str(chat_id).startswith("-"):
         save_group_id(chat_id)
 
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
-    is_admin = from_user.get("id") in admins if from_user.get("id") else True
+    is_admin = user_id in admins if user_id else True
 
     # ─── Album collection ───────────────────────────────────────
     if "media_group_id" in msg:
@@ -377,7 +390,6 @@ def webhook():
 
         interval, display = interval_map[cmd]
 
-        # ─── Send detecting message immediately ─────────────────────
         detecting_response = send_message(
             chat_id,
             "🔍 **Detecting media group/album...**\nPlease wait a moment.",
@@ -388,7 +400,6 @@ def webhook():
         if detecting_response.status_code == 200 and detecting_response.json().get("ok"):
             detecting_msg_id = detecting_response.json()["result"]["message_id"]
 
-        # ================== ALBUM DETECTION ==================
         album_ids = []
         is_album = False
 
@@ -428,14 +439,11 @@ def webhook():
             album_ids = [replied["message_id"]]
             result_text = f"**✓ Repeating started**\nInterval: every {display}"
 
-        # Delete detecting message
         if detecting_msg_id:
             delete_message(chat_id, detecting_msg_id)
 
-        # Send final result
         send_message(chat_id, result_text, parse_mode="Markdown", reply_to_message_id=message_id)
 
-        # Start repeating job
         job_ref = {
             "message_ids": album_ids,
             "running": True,
@@ -451,33 +459,13 @@ def webhook():
         ).start()
 
     # ─── /verify command in private chat ───────────────────────────────
-    elif text.strip() == "/verify" and not str(chat_id).startswith("-"):  # private chat
-        user_id = from_user.get("id")
-        username = from_user.get("username", "no username")
+    elif text.strip() == "/verify" and not str(chat_id).startswith("-"):  # private chat only
+        success = do_verification(user_id, chat_id, username)
 
-        if user_id in pending_verifications:
-            group_chat_id = pending_verifications[user_id]
-            group_title = get_chat_title(group_chat_id)
-
-            verify_text = (
-                f"@{username}\n"
-                f"User ID: <code>{user_id}</code>\n"
-                f"✅ Verified by <b>{group_title}</b>"
-            )
-
+        if not success:
             send_message(
                 chat_id,
-                verify_text,
-                parse_mode="HTML"
-            )
-
-            # Clean up
-            del pending_verifications[user_id]
-        else:
-            send_message(
-                chat_id,
-                "⚠️ No pending verification found.\nPlease use a join request link first.",
-                parse_mode=None
+                "⚠️ No pending verification found.\nPlease use a join request first."
             )
 
         return "OK"
@@ -505,7 +493,6 @@ def index():
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_sent_ids = []
     while job_ref["running"]:
-        # Delete previous messages
         for mid in last_sent_ids:
             delete_message(chat_id, mid)
         last_sent_ids = []
