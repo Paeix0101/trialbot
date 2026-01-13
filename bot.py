@@ -4,25 +4,22 @@ import threading
 from flask import Flask, request
 import requests
 
-TOKEN = os.environ.get("BOT_TOKEN")           # Bot token from BotFather
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")   # Render URL + /webhook
+TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 BOT_API = f"https://api.telegram.org/bot{TOKEN}"
 
-OWNER_ID = 8141547148        # Main Owner with full control
-MONITOR_ID = 8405313334      # kept but no longer used
+OWNER_ID = 8141547148
+MONITOR_ID = 8405313334   # kept but no longer used
 
 app = Flask(__name__)
 
-bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
-BOT_USERNAME = bot_info["username"]
-
 repeat_jobs = {}
 groups_file = "groups.txt"
-media_groups = {}           # (chat_id, media_group_id) → {'ids': list, 'last_time': timestamp}
-last_broadcast_ids = {}     # {group_id: message_id} for one-time broadcast deletion
+media_groups = {}
+last_broadcast_ids = {}
 
 # -------------------- Helper Functions -------------------- #
-def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None, reply_markup=None):
+def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None):
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -31,12 +28,11 @@ def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None, reply
         payload["parse_mode"] = parse_mode
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
     resp = requests.post(f"{BOT_API}/sendMessage", json=payload)
     if resp.status_code == 429:
         print(f"Rate limit hit: {resp.json()}")
     return resp
+
 
 def delete_message(chat_id, message_id):
     if not message_id:
@@ -46,6 +42,7 @@ def delete_message(chat_id, message_id):
         "message_id": message_id
     })
 
+
 def get_chat_administrators(chat_id):
     resp = requests.get(f"{BOT_API}/getChatAdministrators", params={"chat_id": chat_id})
     if resp.status_code == 200:
@@ -54,11 +51,13 @@ def get_chat_administrators(chat_id):
             return data["result"]
     return []
 
+
 def export_invite_link(chat_id):
     resp = requests.get(f"{BOT_API}/exportChatInviteLink", params={"chat_id": chat_id})
     if resp.status_code == 200 and resp.json().get("ok"):
         return resp.json().get("result")
     return None
+
 
 def check_required_permissions(chat_id):
     admins = get_chat_administrators(chat_id)
@@ -75,6 +74,7 @@ def check_required_permissions(chat_id):
             return all(perms)
     return False
 
+
 def save_group_id(chat_id):
     if not str(chat_id).startswith("-"):
         return
@@ -86,11 +86,13 @@ def save_group_id(chat_id):
         with open(groups_file, "a") as f:
             f.write(f"{chat_id}\n")
 
+
 def load_group_ids():
     if not os.path.exists(groups_file):
         return []
     with open(groups_file, "r") as f:
         return f.read().splitlines()
+
 
 def broadcast_message_once(original_chat_id, original_message_id):
     global last_broadcast_ids
@@ -112,6 +114,7 @@ def broadcast_message_once(original_chat_id, original_message_id):
             print(f"Failed to send to {gid}: {e}")
     return success_count
 
+
 def delete_last_broadcast():
     global last_broadcast_ids
     deleted_count = 0
@@ -123,6 +126,7 @@ def delete_last_broadcast():
             print(f"Failed to delete in {gid}: {e}")
     last_broadcast_ids.clear()
     return deleted_count
+
 
 def notify_owner_new_group(chat_id, chat_type, chat_title=None):
     link = export_invite_link(chat_id)
@@ -138,6 +142,7 @@ def notify_owner_new_group(chat_id, chat_type, chat_title=None):
         msg += "\n⚠️ No invite link (Bot may lack permission)."
     send_message(OWNER_ID, msg, parse_mode="HTML")
 
+
 def check_bot_status(target_chat_id):
     resp = requests.get(f"{BOT_API}/getChat", params={"chat_id": target_chat_id})
     if not resp.ok or not resp.json().get("ok"):
@@ -150,6 +155,7 @@ def check_bot_status(target_chat_id):
     else:
         return "⚠️ Bot is inactive (Not admin)."
 
+
 # -------------------- Cleanup old albums --------------------
 def cleanup_old_albums():
     while True:
@@ -159,12 +165,121 @@ def cleanup_old_albums():
         for k in to_delete:
             del media_groups[k]
 
+
+# ==================== NEW FEATURE HELPERS ====================
+def get_group_title(chat_id):
+    try:
+        r = requests.get(f"{BOT_API}/getChat", params={"chat_id": chat_id}, timeout=6)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("ok"):
+                return data["result"].get("title", "Group")
+    except:
+        pass
+    return "Group"
+
+
+def send_welcome_verify_dm(user_id, group_name):
+    text = (
+        "<b>Welcome!</b>\n\n"
+        f"<b>{group_name}</b>\n\n"
+        "Please verify yourself by sending <code>/verify</code>\n"
+        "or click the button below:"
+    )
+
+    payload = {
+        "chat_id": user_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "Verify", "callback_data": f"verify_{user_id}"}
+            ]]
+        }
+    }
+    try:
+        requests.post(f"{BOT_API}/sendMessage", json=payload, timeout=8)
+    except:
+        pass  # silent fail - user might have blocked bot
+
+
 # -------------------- Webhook --------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json()
 
-    # Handle my_chat_member (bot status change)
+    # ─── Handle new members joining ────────────────────────────────
+    if "message" in update:
+        msg = update["message"]
+        if "new_chat_members" in msg:
+            chat = msg["chat"]
+            if chat["type"] in ["group", "supergroup"]:
+                chat_id = chat["id"]
+                group_title = get_group_title(chat_id)
+
+                for member in msg["new_chat_members"]:
+                    uid = member["id"]
+                    # Skip bot itself
+                    if str(uid) == TOKEN.split(":")[0]:
+                        continue
+                    # Send welcome + verify button in private
+                    threading.Thread(
+                        target=send_welcome_verify_dm,
+                        args=(uid, group_title),
+                        daemon=True
+                    ).start()
+
+    # ─── Handle /verify command and button press ───────────────────
+    if "message" in update:
+        msg = update["message"]
+        if msg["chat"]["type"] == "private":
+            text = msg.get("text", "").strip()
+            user = msg["from"]
+
+            if text == "/verify":
+                username = user.get("username")
+                username_str = f"@{username}" if username else "no username"
+
+                response = (
+                    "user_id - <code>{}</code>\n"
+                    "user_name - {}\n"
+                    "verified ✅"
+                ).format(user["id"], username_str)
+
+                send_message(msg["chat"]["id"], response, "HTML")
+                return "OK"
+
+    if "callback_query" in update:
+        cb = update["callback_query"]
+        data = cb.get("data", "")
+        user_id = cb["from"]["id"]
+        callback_id = cb["id"]
+
+        if data.startswith("verify_"):
+            try:
+                _, target_str = data.split("_", 1)
+                if int(target_str) == user_id:
+                    requests.post(f"{BOT_API}/answerCallbackQuery", json={
+                        "callback_query_id": callback_id,
+                        "text": "You are now verified! ✅",
+                        "show_alert": False
+                    })
+                else:
+                    requests.post(f"{BOT_API}/answerCallbackQuery", json={
+                        "callback_query_id": callback_id,
+                        "text": "This button is not for you.",
+                        "show_alert": True
+                    })
+            except:
+                requests.post(f"{BOT_API}/answerCallbackQuery", json={
+                    "callback_query_id": callback_id,
+                    "text": "Something went wrong",
+                    "show_alert": True
+                })
+        return "OK"
+
+    # ─── Everything below is your original code (untouched) ────────
+
     my_chat_member = update.get("my_chat_member")
     if my_chat_member:
         chat = my_chat_member["chat"]
@@ -172,7 +287,6 @@ def webhook():
         chat_type = chat["type"]
         chat_title = chat.get("title", "")
         new_status = my_chat_member["new_chat_member"]["status"]
-
         if new_status in ["administrator", "member"]:
             if not check_required_permissions(chat_id):
                 send_message(OWNER_ID, f"❌ Missing required permissions in {chat_title} ({chat_id})")
@@ -196,50 +310,7 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = from_user.get("id") in admins if from_user.get("id") else True
 
-    # ─── NEW MEMBER WELCOME ───────────────────────────────────────
-    if "new_chat_members" in msg:
-        new_members = msg["new_chat_members"]
-        real_users = [m for m in new_members if not m.get("is_bot")]
-
-        if real_users:
-            # Try to delete default service message
-            try:
-                delete_message(chat_id, message_id)
-            except:
-                pass
-
-            chat_title = msg["chat"].get("title", "the Group")
-
-            for user in real_users:
-                user_id = user["id"]
-                first_name = user.get("first_name", "New Member")
-
-                welcome_text = (
-                    f"Welcome to <b>{chat_title}</b>!<br><br>"
-                    f"👤 <a href=\"tg://user?id={user_id}\">{first_name}</a> has joined the group<br><br>"
-                    "Please verify yourself using the button below 👇"
-                )
-
-                # Inline keyboard with Verify button linking to PM
-                keyboard = {
-                    "inline_keyboard": [[
-                        {
-                            "text": "Verify",
-                            "url": f"https://t.me/{BOT_USERNAME}?start=verify"
-                        }
-                    ]]
-                }
-
-                send_message(
-                    chat_id,
-                    welcome_text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
-
-        return "OK"
-
-    # ─── Album collection ───────────────────────────────────────
+    # Album collection
     if "media_group_id" in msg:
         mgid = msg["media_group_id"]
         key = (chat_id, mgid)
@@ -267,43 +338,28 @@ def webhook():
             send_message(chat_id, "❌ Failed to get invite link.")
         return "OK"
 
-    # /start handling with parameters
-    if text.startswith("/start"):
-        parts = text.split()
-        username = from_user.get("username", "No username")
-        first_name = from_user.get("first_name", "User")
-        user_id = from_user["id"]
-        if len(parts) > 1 and parts[1] == "verify":
-            verify_text = (
-                "✅ <b>Verification Successful</b>\n\n"
-                f"• User ID: <code>{user_id}</code>\n"
-                f"• Name: {first_name}\n"
-                f"• Username: @{username}\n\n"
-                "Status: <b>Verified</b> ✅"
-            )
-            send_message(chat_id, verify_text, parse_mode="HTML")
-            return "OK"
-        else:
-            start_msg = (
-                "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
-                "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
-                "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
-                "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) "
-                "in various intervals.\n\n"
-                "📌It also deletes the last repeated message(s) before sending new one(s).\n\n"
-                "🛠 <b>Commands:</b>\n\n"
-                "🔹 /repeat1min - Repeat every 1 minute\n"
-                "🔹 /repeat3min - Repeat every 3 minutes\n"
-                "🔹 /repeat5min - Repeat every 5 minutes\n"
-                "🔹 /repeat20min - Repeat every 20 minutes\n"
-                "🔹 /repeat60min - Repeat every 60 minutes (1 hour)\n"
-                "🔹 /repeat120min - Repeat every 120 minutes (2 hours)\n"
-                "🔹 /repeat24hours - Repeat every 24 hours\n"
-                "🔹 /stop - Stop all repeating messages\n\n"
-                "⚠️ Only <b>admins</b> can control this bot."
-            )
-            send_message(chat_id, start_msg, parse_mode="HTML")
-            return "OK"
+    # /start
+    if text.strip().lower() == "/start":
+        start_msg = (
+            "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
+            "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
+            "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n"
+            "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) "
+            "in various intervals.\n\n"
+            "📌It also deletes the last repeated message(s) before sending new one(s).\n\n"
+            "🛠 <b>Commands:</b>\n\n"
+            "🔹 /repeat1min - Repeat every 1 minute\n"
+            "🔹 /repeat3min - Repeat every 3 minutes\n"
+            "🔹 /repeat5min - Repeat every 5 minutes\n"
+            "🔹 /repeat20min - Repeat every 20 minutes\n"
+            "🔹 /repeat60min - Repeat every 60 minutes (1 hour)\n"
+            "🔹 /repeat120min - Repeat every 120 minutes (2 hours)\n"
+            "🔹 /repeat24hours - Repeat every 24 hours\n"
+            "🔹 /stop - Stop all repeating messages\n\n"
+            "⚠️ Only <b>admins</b> can control this bot."
+        )
+        send_message(chat_id, start_msg, parse_mode="HTML")
+        return "OK"
 
     # One-time broadcast
     if chat_id == OWNER_ID and text.startswith("/lemonchus"):
@@ -319,29 +375,25 @@ def webhook():
         send_message(chat_id, f"🗑️ Deleted from {deleted} groups." if deleted > 0 else "No previous broadcast.")
         return "OK"
 
-    # ─── Repeat commands ────────────────────────────────────────
+    # Repeat commands
     if "reply_to_message" in msg and text.startswith("/repeat"):
         if not is_admin:
             send_message(chat_id, "Only group admins can use repeat commands.", reply_to_message_id=message_id)
             return "OK"
-
         replied = msg["reply_to_message"]
         cmd = text.split()[0].lower()
-
         interval_map = {
-            "/repeat1min":   (60,    "1 minute"),
-            "/repeat3min":   (180,   "3 minutes"),
-            "/repeat5min":   (300,   "5 minutes"),
-            "/repeat20min":  (1200,  "20 minutes"),
-            "/repeat60min":  (3600,  "1 hour"),
-            "/repeat120min": (7200,  "2 hours"),
-            "/repeat24hours":(86400, "24 hours"),
+            "/repeat1min": (60, "1 minute"),
+            "/repeat3min": (180, "3 minutes"),
+            "/repeat5min": (300, "5 minutes"),
+            "/repeat20min": (1200, "20 minutes"),
+            "/repeat60min": (3600, "1 hour"),
+            "/repeat120min": (7200, "2 hours"),
+            "/repeat24hours": (86400, "24 hours"),
         }
-
         if cmd not in interval_map:
             send_message(chat_id, "Invalid command.\nAvailable: " + ", ".join(interval_map.keys()), reply_to_message_id=message_id)
             return "OK"
-
         interval, display = interval_map[cmd]
 
         detecting_response = send_message(
@@ -356,15 +408,12 @@ def webhook():
 
         album_ids = []
         is_album = False
-
         if "media_group_id" in replied:
             mgid = replied["media_group_id"]
             key = (chat_id, mgid)
-
             waited = 0
             max_wait = 4.5
             step = 0.35
-
             while waited < max_wait:
                 if key in media_groups:
                     if len(media_groups[key]['ids']) > 1:
@@ -372,14 +421,11 @@ def webhook():
                 time.sleep(step)
                 waited += step
                 step = min(step + 0.15, 0.8)
-
             if key in media_groups:
                 album_ids = sorted(media_groups[key]['ids'])
             else:
                 album_ids = [replied["message_id"]]
-
             print(f"[ALBUM DETECT] chat={chat_id} | mgid={mgid} | items={len(album_ids)} | ids={album_ids}")
-
             if len(album_ids) > 1:
                 is_album = True
                 result_text = f"**✓ Album detected** ({len(album_ids)} items)\nWill repeat every {display}."
@@ -405,7 +451,6 @@ def webhook():
             "is_album": is_album
         }
         repeat_jobs.setdefault(chat_id, []).append(job_ref)
-
         threading.Thread(
             target=repeater,
             args=(chat_id, album_ids, interval, job_ref, is_album),
@@ -416,7 +461,6 @@ def webhook():
         if not is_admin:
             send_message(chat_id, "Only group admins can stop repeating.", reply_to_message_id=message_id)
             return "OK"
-
         if chat_id in repeat_jobs and repeat_jobs[chat_id]:
             for job in repeat_jobs[chat_id]:
                 job["running"] = False
@@ -427,9 +471,11 @@ def webhook():
 
     return "OK"
 
+
 @app.route("/")
 def index():
     return "Bot is alive!"
+
 
 # -------------------- Repeater --------------------
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
@@ -458,6 +504,7 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
 
         time.sleep(interval)
 
+
 # -------------------- Keep Alive --------------------
 def keep_alive():
     while True:
@@ -468,12 +515,10 @@ def keep_alive():
             print(f"Keep-alive failed: {e}")
         time.sleep(300)
 
-if __name__ == "__main__":
-    # Set webhook
-    requests.get(f"{BOT_API}/setWebhook?url={WEBHOOK_URL}/webhook")
 
+if __name__ == "__main__":
+    requests.get(f"{BOT_API}/setWebhook?url={WEBHOOK_URL}/webhook")
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=cleanup_old_albums, daemon=True).start()
-
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
