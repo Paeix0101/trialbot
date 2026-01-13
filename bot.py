@@ -166,18 +166,14 @@ def cleanup_old_albums():
             del media_groups[k]
 
 # -------------------- Verification logic --------------------
-def do_verification(user_id, chat_id, username):
+def do_verification(user_id, chat_id):
     if user_id not in pending_verifications:
         return False
 
     group_chat_id = pending_verifications[user_id]
     group_title = get_chat_title(group_chat_id)
 
-    verify_text = (
-        f"user_name - @{username}\n"
-        f"user_id - {user_id}\n"
-        f"verified by {group_title}"
-    )
+    verify_text = f"verified✅ by {group_title}"
 
     send_message(
         chat_id,
@@ -202,8 +198,7 @@ def webhook():
         group_title = chat.get("title", "the group")
         user = jr["from"]
         user_id = user["id"]
-        user_chat_id = jr.get("user_chat_id")
-        username = user.get("username", "no username")
+        user_chat_id = jr.get("user_chat_id")   # temporary private chat id
 
         if user_chat_id:
             welcome_text = (
@@ -240,12 +235,11 @@ def webhook():
 
         return "OK"
 
-    # 2. Handle callback query (Verify button)
+    # 2. Handle callback query (Verify button clicked)
     if "callback_query" in update:
         cq = update["callback_query"]
         user_id = cq["from"]["id"]
         data = cq.get("data")
-        username = cq["from"].get("username", "no username")
         private_chat_id = cq["message"]["chat"]["id"]
 
         if data == "do_verify":
@@ -255,17 +249,11 @@ def webhook():
                 "show_alert": False
             })
 
-            success = do_verification(user_id, private_chat_id, username)
-
-            if not success:
-                send_message(
-                    private_chat_id,
-                    "⚠️ No pending verification found.\nTry joining a group again."
-                )
+            do_verification(user_id, private_chat_id)  # silent if no pending
 
         return "OK"
 
-    # Normal message / channel post / my_chat_member
+    # ─── Normal message handling ───────────────────────────────────────
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
 
@@ -291,7 +279,6 @@ def webhook():
     text = msg.get("text", "") or msg.get("caption", "")
     from_user = msg.get("from", {"id": None})
     message_id = msg.get("message_id")
-    username = from_user.get("username", "no username")
     user_id = from_user.get("id")
 
     if str(chat_id).startswith("-"):
@@ -300,7 +287,7 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
 
-    # Album / media group collection
+    # ─── Album collection ───────────────────────────────────────
     if "media_group_id" in msg:
         mgid = msg["media_group_id"]
         key = (chat_id, mgid)
@@ -309,7 +296,7 @@ def webhook():
         media_groups[key]['ids'].append(msg["message_id"])
         media_groups[key]['last_time'] = time.time()
 
-    # Owner special commands
+    # OWNER special commands
     if chat_id == OWNER_ID and text.strip().startswith("-"):
         status_message = check_bot_status(text.strip())
         send_message(chat_id, status_message)
@@ -351,7 +338,7 @@ def webhook():
         send_message(chat_id, start_msg, parse_mode="HTML")
         return "OK"
 
-    # One-time broadcast commands
+    # One-time broadcast
     if chat_id == OWNER_ID and text.startswith("/lemonchus"):
         if "reply_to_message" in msg:
             count = broadcast_message_once(chat_id, msg["reply_to_message"]["message_id"])
@@ -365,7 +352,7 @@ def webhook():
         send_message(chat_id, f"🗑️ Deleted from {deleted} groups." if deleted > 0 else "No previous broadcast.")
         return "OK"
 
-    # Repeat commands
+    # ─── Repeat commands ────────────────────────────────────────
     if "reply_to_message" in msg and text.startswith("/repeat"):
         if not is_admin:
             send_message(chat_id, "Only group admins can use repeat commands.", reply_to_message_id=message_id)
@@ -412,8 +399,9 @@ def webhook():
             step = 0.35
 
             while waited < max_wait:
-                if key in media_groups and len(media_groups[key]['ids']) > 1:
-                    break
+                if key in media_groups:
+                    if len(media_groups[key]['ids']) > 1:
+                        break
                 time.sleep(step)
                 waited += step
                 step = min(step + 0.15, 0.8)
@@ -432,7 +420,7 @@ def webhook():
                 result_text = (
                     "**⚠️ Only single message detected**\n"
                     "If this was supposed to be an album,\n"
-                    "please use /stop, send album again and try repeat command again."
+                    "please use /stop send album again in group / channel and try the repeat command again."
                 )
         else:
             album_ids = [replied["message_id"]]
@@ -457,17 +445,11 @@ def webhook():
             daemon=True
         ).start()
 
-    # /verify command in private chat
+    # ─── /verify command in private chat ───────────────────────────────
     elif text.strip() == "/verify" and not str(chat_id).startswith("-"):
-        success = do_verification(user_id, chat_id, username)
-        if not success:
-            send_message(
-                chat_id,
-                "⚠️ No pending verification found.\nPlease use a join request first."
-            )
+        do_verification(user_id, chat_id)  # silent if no pending
         return "OK"
 
-    # /stop
     elif text.startswith("/stop"):
         if not is_admin:
             send_message(chat_id, "Only group admins can stop repeating.", reply_to_message_id=message_id)
@@ -487,11 +469,10 @@ def webhook():
 def index():
     return "Bot is alive!"
 
-# -------------------- Repeater function --------------------
+# -------------------- Repeater --------------------
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_sent_ids = []
     while job_ref["running"]:
-        # Delete previous copy
         for mid in last_sent_ids:
             delete_message(chat_id, mid)
         last_sent_ids = []
@@ -515,7 +496,7 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
 
         time.sleep(interval)
 
-# -------------------- Keep alive --------------------
+# -------------------- Keep Alive --------------------
 def keep_alive():
     while True:
         try:
