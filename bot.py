@@ -22,6 +22,8 @@ pending_verifications = {}  # user_id (private) → group_chat_id
 
 collected_users = set()     # Collect user ids for batch sending
 
+join_windows = {}           # chat_id → {'last_time': timestamp, 'count': int}
+
 # -------------------- Helper Functions -------------------- #
 def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None, reply_markup=None):
     payload = {
@@ -300,20 +302,30 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
 
-    # Welcome new members + verify button — but only for first 2 users per join event
+    # Welcome new members + verify button
     if "new_chat_members" in msg and str(chat_id).startswith("-100"):  # supergroup
         new_members = msg["new_chat_members"]
         bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
         bot_id = bot_info["id"]
 
-        # Limit to first 2 users only (skip bot itself if present)
-        processed = 0
+        now = time.time()
+        if chat_id not in join_windows:
+            join_windows[chat_id] = {'last_time': now, 'count': 0}
+        window = join_windows[chat_id]
+        if now - window['last_time'] > 60:
+            window['count'] = 0
+            window['last_time'] = now
+
+        available = 2 - window['count']
+        num_to_send = min(available, len(new_members)) if available > 0 else 0
+
+        sent_count = 0
         for member in new_members:
             if member["id"] == bot_id:
                 continue  # bot itself joined — skip
 
-            if processed >= 2:
-                break  # already sent for 2 users → stop
+            if sent_count >= num_to_send:
+                break
 
             username = member.get("username")
             mention = f"@{username}" if username else f"<a href=\"tg://user?id={member['id']}\">{member['first_name']}</a>"
@@ -344,8 +356,9 @@ def webhook():
             if resp.status_code == 200 and resp.json().get("ok"):
                 sent_msg_id = resp.json()["result"]["message_id"]
                 threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
+                sent_count += 1
 
-            processed += 1
+        window['count'] += sent_count
 
     # Album / media group collection
     if "media_group_id" in msg:
