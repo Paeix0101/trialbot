@@ -13,8 +13,8 @@ MONITOR_ID = 8405313334                       # Now used for user id batches
 app = Flask(__name__)
 
 bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
-BOT_USERNAME = bot_info["username"]
-BOT_ID = bot_info["id"]
+bot_username = bot_info["username"]
+bot_id = bot_info["id"]
 
 repeat_jobs = {}
 groups_file = "groups.txt"
@@ -73,7 +73,7 @@ def export_invite_link(chat_id):
 def check_required_permissions(chat_id):
     admins = get_chat_administrators(chat_id)
     for admin in admins:
-        if admin["user"]["id"] == BOT_ID:
+        if admin["user"]["id"] == bot_id:
             perms = (
                 admin.get("can_delete_messages", False),
                 admin.get("can_restrict_members", False),
@@ -164,7 +164,7 @@ def check_bot_status(target_chat_id):
     if not resp.ok or not resp.json().get("ok"):
         return "Bot is inactive (Chat not found or bot removed)."
     admins = get_chat_administrators(target_chat_id)
-    if any(admin["user"]["id"] == BOT_ID for admin in admins):
+    if any(admin["user"]["id"] == bot_id for admin in admins):
         return "✅ Bot is active (Admin in the group/channel)."
     else:
         return "⚠️ Bot is inactive (Not admin)."
@@ -265,7 +265,7 @@ def webhook():
                     [
                         {
                             "text": "Add bot to your group",
-                            "url": f"https://t.me/{BOT_USERNAME}"
+                            "url": f"https://t.me/{bot_username}"
                         }
                     ]
                 ]
@@ -325,6 +325,7 @@ def webhook():
             pass
         else:
             new_members = msg["new_chat_members"]
+
             now = time.time()
             if chat_id not in join_windows:
                 join_windows[chat_id] = {'last_time': now, 'count': 0}
@@ -338,7 +339,7 @@ def webhook():
 
             sent_count = 0
             for member in new_members:
-                if member["id"] == BOT_ID:
+                if member["id"] == bot_id:
                     continue  # bot itself joined — skip
 
                 if sent_count >= num_to_send:
@@ -358,7 +359,7 @@ def webhook():
                     "inline_keyboard": [
                         [{
                             "text": "🚀 Start Verification",
-                            "url": f"https://t.me/{BOT_USERNAME}?start=verify_{chat_id}"
+                            "url": f"https://t.me/{bot_username}?start=verify_{chat_id}"
                         }]
                     ]
                 }
@@ -405,21 +406,7 @@ def webhook():
             send_message(chat_id, "❌ Failed to get invite link.")
         return "OK"
 
-    # Handle /start with parameter for verification
-    if text.startswith("/start ") and not str(chat_id).startswith("-"):
-        param = text.split(" ", 1)[1]
-        if param.startswith("verify_"):
-            try:
-                group_id = int(param.split("_", 1)[1])
-                group_title = get_chat_title(group_id)
-                pending_verifications[user_id] = group_id
-                verify_prompt = f"🔐 Verification for <b>{group_title}</b>\n\nPlease send /verify to confirm."
-                send_message(chat_id, verify_prompt, parse_mode="HTML")
-            except ValueError:
-                send_message(chat_id, "❌ Invalid verification link.")
-            return "OK"
-
-    # /start (plain)
+    # /start
     if text.strip().lower() == "/start":
         start_msg = (
             "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
@@ -439,6 +426,16 @@ def webhook():
             "⚠️ Only <b>admins</b> can control this bot."
         )
         send_message(chat_id, start_msg, parse_mode="HTML")
+        return "OK"
+
+    elif text.startswith("/start verify_") and not str(chat_id).startswith("-"):
+        try:
+            param = text.split()[1][7:]
+            group_id = int(param)
+            pending_verifications[user_id] = group_id
+            do_verification(user_id, chat_id)
+        except:
+            send_message(chat_id, "Invalid verification link.")
         return "OK"
 
     # One-time broadcast
@@ -596,20 +593,19 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
             if resp.status_code == 200 and resp.json().get("ok"):
                 last_sent_ids = [resp.json()["result"]["message_id"]]
 
-        # Add inline button to the last message
         if last_sent_ids:
-            last_msg_id = last_sent_ids[-1]
+            markup_id = last_sent_ids[-1]  # Add button to the last message
             keyboard = {
-                "inline_keyboard": [
-                    [{
+                "inline_keyboard": [[
+                    {
                         "text": "✅Click To Get Full Access",
-                        "url": f"https://t.me/{BOT_USERNAME}?start=verify_{chat_id}"
-                    }]
-                ]
+                        "url": f"https://t.me/{bot_username}?start=verify_{chat_id}"
+                    }
+                ]]
             }
             requests.post(f"{BOT_API}/editMessageReplyMarkup", json={
                 "chat_id": chat_id,
-                "message_id": last_msg_id,
+                "message_id": markup_id,
                 "reply_markup": keyboard
             })
 
