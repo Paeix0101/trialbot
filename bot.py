@@ -17,12 +17,13 @@ groups_file = "groups.txt"
 media_groups = {}           # (chat_id, media_group_id) → {'ids': list, 'last_time': timestamp}
 last_broadcast_ids = {}     # {group_id: message_id} for one-time broadcast deletion
 
-# Dictionary to remember which group the verification is for (user_id → chat_id)
 pending_verifications = {}  # user_id (private) → group_chat_id
 
 collected_users = set()     # Collect user ids for batch sending
 
 join_windows = {}           # chat_id → {'last_time': timestamp, 'count': int}
+
+BOT_USERNAME = None         # Will be set at startup
 
 # -------------------- Helper Functions -------------------- #
 def send_message(chat_id, text, parse_mode=None, reply_to_message_id=None, reply_markup=None):
@@ -88,6 +89,18 @@ def get_chat_title(chat_id):
     if resp.status_code == 200 and resp.json().get("ok"):
         return resp.json()["result"].get("title", "the group")
     return "the group"
+
+
+def get_bot_username():
+    global BOT_USERNAME
+    try:
+        resp = requests.get(f"{BOT_API}/getMe").json()
+        if resp.get("ok"):
+            BOT_USERNAME = resp["result"]["username"]
+            return BOT_USERNAME
+    except:
+        pass
+    return None
 
 
 def save_group_id(chat_id):
@@ -171,12 +184,29 @@ def check_bot_status(target_chat_id):
         return "⚠️ Bot is inactive (Not admin)."
 
 
+def can_regular_members_send_messages(chat_id):
+    """Check if default permissions allow regular members to send text messages"""
+    try:
+        resp = requests.get(f"{BOT_API}/getChat", params={"chat_id": chat_id})
+        data = resp.json()
+        if not data.get("ok"):
+            return False
+        
+        chat = data["result"]
+        if "permissions" not in chat:
+            return True
+        
+        return chat["permissions"].get("can_send_messages", True)
+    except Exception:
+        return True
+
+
 # -------------------- Cleanup old albums --------------------
 def cleanup_old_albums():
     while True:
         time.sleep(60)
         now = time.time()
-        to_delete = [k for k, v in media_groups.items() if now - v['last_time'] > 360]  # 6 min
+        to_delete = [k for k, v in media_groups.items() if now - v['last_time'] > 360]
         for k in to_delete:
             del media_groups[k]
 
@@ -193,7 +223,6 @@ def do_verification(user_id, chat_id):
         verify_text,
         parse_mode=None
     )
-    # Clean up
     del pending_verifications[user_id]
     return True
 
@@ -212,7 +241,7 @@ def flush_user_batch():
 
 def send_user_batch():
     while True:
-        time.sleep(600)  # 10 minutes
+        time.sleep(600)
         flush_user_batch()
 
 
@@ -221,7 +250,6 @@ def send_user_batch():
 def webhook():
     update = request.get_json()
 
-    # 1. Handle join request (via approve system)
     if "chat_join_request" in update:
         jr = update["chat_join_request"]
         chat = jr["chat"]
@@ -229,7 +257,7 @@ def webhook():
         group_title = chat.get("title", "the group")
         user = jr["from"]
         user_id = user["id"]
-        user_chat_id = jr.get("user_chat_id")  # temporary private chat id
+        user_chat_id = jr.get("user_chat_id")
 
         collected_users.add(user_id)
         if len(collected_users) >= 200:
@@ -249,7 +277,7 @@ def webhook():
                     [
                         {
                             "text": "Add bot to your group",
-                            "url": f"https://t.me/{requests.get(f'{BOT_API}/getMe').json()['result']['username']}"
+                            "url": f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "https://t.me/"
                         }
                     ]
                 ]
@@ -263,7 +291,6 @@ def webhook():
             pending_verifications[user_id] = group_chat_id
         return "OK"
 
-    # 2. Normal message / channel post / my_chat_member
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
 
@@ -302,63 +329,66 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
 
-    # Welcome new members + verify button
-    if "new_chat_members" in msg and str(chat_id).startswith("-100"):  # supergroup
-        new_members = msg["new_chat_members"]
-        bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
-        bot_id = bot_info["id"]
+    # Welcome new members + verify button — ONLY if members can normally send messages
+    if "new_chat_members" in msg and str(chat_id).startswith("-"):
+        if not can_regular_members_send_messages(chat_id):
+            pass  # Skip if group is restricted
+        else:
+            new_members = msg["new_chat_members"]
+            bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
+            bot_id = bot_info["id"]
 
-        now = time.time()
-        if chat_id not in join_windows:
-            join_windows[chat_id] = {'last_time': now, 'count': 0}
-        window = join_windows[chat_id]
-        if now - window['last_time'] > 60:
-            window['count'] = 0
-            window['last_time'] = now
+            now = time.time()
+            if chat_id not in join_windows:
+                join_windows[chat_id] = {'last_time': now, 'count': 0}
+            window = join_windows[chat_id]
+            if now - window['last_time'] > 60:
+                window['count'] = 0
+                window['last_time'] = now
 
-        available = 2 - window['count']
-        num_to_send = min(available, len(new_members)) if available > 0 else 0
+            available = 2 - window['count']
+            num_to_send = min(available, len(new_members)) if available > 0 else 0
 
-        sent_count = 0
-        for member in new_members:
-            if member["id"] == bot_id:
-                continue  # bot itself joined — skip
+            sent_count = 0
+            for member in new_members:
+                if member["id"] == bot_id:
+                    continue
 
-            if sent_count >= num_to_send:
-                break
+                if sent_count >= num_to_send:
+                    break
 
-            username = member.get("username")
-            mention = f"@{username}" if username else f"<a href=\"tg://user?id={member['id']}\">{member['first_name']}</a>"
+                username = member.get("username")
+                mention = f"@{username}" if username else f"<a href=\"tg://user?id={member['id']}\">{member['first_name']}</a>"
 
-            welcome_text = (
-                f"Welcome {mention}!\n\n"
-                "Please verify yourself to gain full access.\n"
-                "Click the button below to start verification\n\n"
-                "<i>Note: This message will be deleted in 60 seconds</i>"
-            )
+                welcome_text = (
+                    f"🚨user {mention}!\n\n"
+                    "Please verify yourself to gain full access.\n"
+                    "Click the button below to start verification\n\n"
+                    "<i>Note: This message will be deleted in 60 seconds</i>"
+                )
 
-            keyboard = {
-                "inline_keyboard": [
-                    [{
-                        "text": "🚀 Start Verification",
-                        "url": f"https://t.me/{bot_info['username']}?start=verify_{chat_id}"
-                    }]
-                ]
-            }
+                keyboard = {
+                    "inline_keyboard": [
+                        [{
+                            "text": "🚀 Start Verification",
+                            "url": f"https://t.me/{BOT_USERNAME}?start=verify_{chat_id}" if BOT_USERNAME else ""
+                        }]
+                    ]
+                }
 
-            resp = send_message(
-                chat_id=chat_id,
-                text=welcome_text,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
+                resp = send_message(
+                    chat_id=chat_id,
+                    text=welcome_text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
 
-            if resp.status_code == 200 and resp.json().get("ok"):
-                sent_msg_id = resp.json()["result"]["message_id"]
-                threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
-                sent_count += 1
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    sent_msg_id = resp.json()["result"]["message_id"]
+                    threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
+                    sent_count += 1
 
-        window['count'] += sent_count
+            window['count'] += sent_count
 
     # Album / media group collection
     if "media_group_id" in msg:
@@ -388,8 +418,23 @@ def webhook():
             send_message(chat_id, "❌ Failed to get invite link.")
         return "OK"
 
-    # /start
-    if text.strip().lower() == "/start":
+    # /start and deep linking for verification button
+    if text.strip().lower().startswith("/start"):
+        parts = text.strip().split()
+        if len(parts) > 1 and parts[1].startswith("verify_"):
+            try:
+                group_chat_id_str = parts[1].split("verify_", 1)[1]
+                group_chat_id = int(group_chat_id_str)
+                pending_verifications[user_id] = group_chat_id
+                if do_verification(user_id, chat_id):
+                    send_message(chat_id, "✅ You have been verified successfully!")
+                else:
+                    send_message(chat_id, "Verification processed (no pending request found).")
+            except:
+                send_message(chat_id, "Invalid verification link.")
+            return "OK"
+
+        # Normal /start
         start_msg = (
             "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
             "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n"
@@ -512,12 +557,10 @@ def webhook():
             daemon=True
         ).start()
 
-    # /verify command in private chat
     elif text.strip() == "/verify" and not str(chat_id).startswith("-"):
-        do_verification(user_id, chat_id)  # silent if no pending
+        do_verification(user_id, chat_id)
         return "OK"
 
-    # /stop
     elif text.startswith("/stop"):
         if not is_admin:
             send_message(chat_id, "Only group admins can stop repeating.", reply_to_message_id=message_id)
@@ -534,19 +577,31 @@ def webhook():
     return "OK"
 
 
-@app.route("/")
-def index():
-    return "Bot is alive!"
-
-
-# -------------------- Repeater --------------------
+# -------------------- Repeater with verification button --------------------
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
+    global BOT_USERNAME
     last_sent_ids = []
+    
     while job_ref["running"]:
         # Delete previous copies
         for mid in last_sent_ids:
             delete_message(chat_id, mid)
         last_sent_ids = []
+
+        # Prepare verification button
+        verify_url = None
+        keyboard = None
+        
+        if BOT_USERNAME:
+            verify_url = f"https://t.me/{BOT_USERNAME}?start=verify_{chat_id}"
+            keyboard = {
+                "inline_keyboard": [[
+                    {
+                        "text": "✅Click To Get Full Access",
+                        "url": verify_url
+                    }
+                ]]
+            }
 
         if is_album:
             resp = requests.post(f"{BOT_API}/copyMessages", json={
@@ -555,7 +610,17 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
                 "message_ids": message_ids
             })
             if resp.status_code == 200 and resp.json().get("ok"):
-                last_sent_ids = [m["message_id"] for m in resp.json()["result"]]
+                results = resp.json()["result"]
+                last_sent_ids = [m["message_id"] for m in results]
+                
+                # Add button to the LAST item of the album
+                if last_sent_ids and keyboard:
+                    last_msg_id = last_sent_ids[-1]
+                    requests.post(f"{BOT_API}/editMessageReplyMarkup", json={
+                        "chat_id": chat_id,
+                        "message_id": last_msg_id,
+                        "reply_markup": keyboard
+                    })
         else:
             resp = requests.post(f"{BOT_API}/copyMessage", json={
                 "chat_id": chat_id,
@@ -563,9 +628,22 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
                 "message_id": message_ids[0]
             })
             if resp.status_code == 200 and resp.json().get("ok"):
-                last_sent_ids = [resp.json()["result"]["message_id"]]
+                new_msg_id = resp.json()["result"]["message_id"]
+                last_sent_ids = [new_msg_id]
+                
+                if keyboard:
+                    requests.post(f"{BOT_API}/editMessageReplyMarkup", json={
+                        "chat_id": chat_id,
+                        "message_id": new_msg_id,
+                        "reply_markup": keyboard
+                    })
 
         time.sleep(interval)
+
+
+@app.route("/")
+def index():
+    return "Bot is alive!"
 
 
 # -------------------- Keep Alive --------------------
@@ -580,6 +658,11 @@ def keep_alive():
 
 
 if __name__ == "__main__":
+    # Get bot username for deep linking
+    BOT_USERNAME = get_bot_username()
+    if not BOT_USERNAME:
+        print("WARNING: Could not fetch bot username. Verification button links may not work.")
+
     # Set webhook
     requests.get(f"{BOT_API}/setWebhook?url={WEBHOOK_URL}/webhook")
 
