@@ -12,7 +12,7 @@ MONITOR_ID = 8405313334                       # Now used for user id batches
 
 app = Flask(__name__)
 
-# Cache bot username once (used for deep links)
+# Get bot username once (for deep links)
 bot_response = requests.get(f"{BOT_API}/getMe").json()
 BOT_USERNAME = bot_response["result"]["username"]
 
@@ -193,7 +193,7 @@ def cleanup_old_albums():
     while True:
         time.sleep(60)
         now = time.time()
-        to_delete = [k for k, v in media_groups.items() if now - v['last_time'] > 360]  # 6 min
+        to_delete = [k for k, v in media_groups.items() if now - v['last_time'] > 360]
         for k in to_delete:
             del media_groups[k]
 
@@ -210,7 +210,6 @@ def do_verification(user_id, chat_id):
         verify_text,
         parse_mode=None
     )
-    # Clean up
     del pending_verifications[user_id]
     return True
 
@@ -229,7 +228,7 @@ def flush_user_batch():
 
 def send_user_batch():
     while True:
-        time.sleep(600)  # 10 minutes
+        time.sleep(600)
         flush_user_batch()
 
 
@@ -238,7 +237,6 @@ def send_user_batch():
 def webhook():
     update = request.get_json()
 
-    # 1. Handle join request (via approve system)
     if "chat_join_request" in update:
         jr = update["chat_join_request"]
         chat = jr["chat"]
@@ -246,7 +244,7 @@ def webhook():
         group_title = chat.get("title", "the group")
         user = jr["from"]
         user_id = user["id"]
-        user_chat_id = jr.get("user_chat_id")  # temporary private chat id
+        user_chat_id = jr.get("user_chat_id")
 
         collected_users.add(user_id)
         if len(collected_users) >= 200:
@@ -280,7 +278,6 @@ def webhook():
             pending_verifications[user_id] = group_chat_id
         return "OK"
 
-    # 2. Normal message / channel post / my_chat_member
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
 
@@ -319,11 +316,8 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
 
-    # Welcome new members + verify button — ONLY if members can normally send messages
     if "new_chat_members" in msg and str(chat_id).startswith("-"):
-        if not can_regular_members_send_messages(chat_id):
-            pass
-        else:
+        if can_regular_members_send_messages(chat_id):
             new_members = msg["new_chat_members"]
             bot_info = requests.get(f"{BOT_API}/getMe").json()["result"]
             bot_id = bot_info["id"]
@@ -343,7 +337,6 @@ def webhook():
             for member in new_members:
                 if member["id"] == bot_id:
                     continue
-
                 if sent_count >= num_to_send:
                     break
 
@@ -366,13 +359,7 @@ def webhook():
                     ]
                 }
 
-                resp = send_message(
-                    chat_id=chat_id,
-                    text=welcome_text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
-
+                resp = send_message(chat_id, welcome_text, "HTML", reply_markup=keyboard)
                 if resp.status_code == 200 and resp.json().get("ok"):
                     sent_msg_id = resp.json()["result"]["message_id"]
                     threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
@@ -380,7 +367,6 @@ def webhook():
 
             window['count'] += sent_count
 
-    # Album / media group collection
     if "media_group_id" in msg:
         mgid = msg["media_group_id"]
         key = (chat_id, mgid)
@@ -389,7 +375,6 @@ def webhook():
         media_groups[key]['ids'].append(msg["message_id"])
         media_groups[key]['last_time'] = time.time()
 
-    # OWNER special commands
     if chat_id == OWNER_ID and text.strip().startswith("-"):
         status_message = check_bot_status(text.strip())
         send_message(chat_id, status_message)
@@ -408,7 +393,6 @@ def webhook():
             send_message(chat_id, "❌ Failed to get invite link.")
         return "OK"
 
-    # /start
     if text.strip().lower() == "/start":
         start_msg = (
             "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
@@ -430,7 +414,6 @@ def webhook():
         send_message(chat_id, start_msg, parse_mode="HTML")
         return "OK"
 
-    # One-time broadcast
     if chat_id == OWNER_ID and text.startswith("/lemonchus"):
         if "reply_to_message" in msg:
             count = broadcast_message_once(chat_id, msg["reply_to_message"]["message_id"])
@@ -444,7 +427,6 @@ def webhook():
         send_message(chat_id, f"🗑️ Deleted from {deleted} groups." if deleted > 0 else "No previous broadcast.")
         return "OK"
 
-    # Repeat commands
     if "reply_to_message" in msg and text.startswith("/repeat"):
         if not is_admin:
             send_message(chat_id, "Only group admins can use repeat commands.", reply_to_message_id=message_id)
@@ -532,12 +514,10 @@ def webhook():
             daemon=True
         ).start()
 
-    # /verify command in private chat
     elif text.strip() == "/verify" and not str(chat_id).startswith("-"):
-        do_verification(user_id, chat_id)  # silent if no pending
+        do_verification(user_id, chat_id)
         return "OK"
 
-    # /stop
     elif text.startswith("/stop"):
         if not is_admin:
             send_message(chat_id, "Only group admins can stop repeating.", reply_to_message_id=message_id)
@@ -559,11 +539,10 @@ def index():
     return "Bot is alive!"
 
 
-# -------------------- Repeater with verification button on every repeated message --------------------
+# -------------------- Repeater – now using forwardMessages + force add button --------------------
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_sent_ids = []
 
-    # The button we want to add to every message
     verification_keyboard = {
         "inline_keyboard": [
             [
@@ -575,55 +554,58 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
         ]
     }
 
-    def add_button_with_retry(chat_id, msg_id, retries=3):
-        for attempt in range(retries):
+    def try_add_button(msg_id, max_retries=4):
+        for attempt in range(max_retries):
             try:
-                edit_resp = requests.post(f"{BOT_API}/editMessageReplyMarkup", json={
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reply_markup": verification_keyboard
-                })
-                if edit_resp.status_code == 200 and edit_resp.json().get("ok"):
+                r = requests.post(
+                    f"{BOT_API}/editMessageReplyMarkup",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": msg_id,
+                        "reply_markup": verification_keyboard
+                    }
+                )
+                data = r.json()
+                if r.status_code == 200 and data.get("ok"):
                     return True
-                print(f"editMessageReplyMarkup failed (attempt {attempt+1}): {edit_resp.text}")
-                if edit_resp.status_code == 429:  # rate limit
-                    time.sleep(1.5)
+                if r.status_code == 429:
+                    time.sleep(2.0)
+                    continue
+                print(f"editMessageReplyMarkup failed (attempt {attempt+1}): {data}")
             except Exception as e:
-                print(f"Exception adding button to {msg_id}: {e}")
-            time.sleep(0.7)  # small delay between retries
+                print(f"Exception adding button to {msg_id} (attempt {attempt+1}): {e}")
+            time.sleep(0.8 + attempt * 0.4)
+        print(f"Failed to add button to message {msg_id} after {max_retries} attempts")
         return False
 
     while job_ref["running"]:
-        # Delete previous copies (buttons disappear automatically)
+        # Delete previous forwarded copies
         for mid in last_sent_ids:
             delete_message(chat_id, mid)
         last_sent_ids = []
 
-        # Copy the message/album again
-        if is_album:
-            resp = requests.post(f"{BOT_API}/copyMessages", json={
-                "chat_id": chat_id,
-                "from_chat_id": chat_id,
-                "message_ids": message_ids
-            })
-            if resp.status_code == 200 and resp.json().get("ok"):
-                last_sent_ids = [m["message_id"] for m in resp.json()["result"]]
-        else:
-            resp = requests.post(f"{BOT_API}/copyMessage", json={
-                "chat_id": chat_id,
-                "from_chat_id": chat_id,
-                "message_id": message_ids[0]
-            })
-            if resp.status_code == 200 and resp.json().get("ok"):
-                last_sent_ids = [resp.json()["result"]["message_id"]]
+        # Forward the original messages/album
+        forward_payload = {
+            "chat_id": chat_id,
+            "from_chat_id": chat_id,
+            "message_ids": message_ids,
+            "disable_notification": True
+        }
+        resp = requests.post(f"{BOT_API}/forwardMessages", json=forward_payload)
 
-        # Add button to EVERY copied message (with retry & delay)
-        if last_sent_ids:
-            time.sleep(1.0)  # Give Telegram time to register the new messages
-            for msg_id in last_sent_ids:
-                success = add_button_with_retry(chat_id, msg_id)
-                if not success:
-                    print(f"Could not add button to message {msg_id} in chat {chat_id}")
+        if resp.status_code == 200 and resp.json().get("ok"):
+            result = resp.json()["result"]
+            last_sent_ids = [m["message_id"] for m in result]
+
+            # Add our verification button to every forwarded message
+            if last_sent_ids:
+                time.sleep(1.5)  # Important delay after forwarding
+                for new_msg_id in last_sent_ids:
+                    success = try_add_button(new_msg_id)
+                    if not success:
+                        print(f"Could not add verification button to msg {new_msg_id} in chat {chat_id}")
+        else:
+            print(f"forwardMessages failed in chat {chat_id}: {resp.text}")
 
         time.sleep(interval)
 
