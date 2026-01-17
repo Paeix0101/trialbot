@@ -344,7 +344,7 @@ def webhook():
     admins = [a["user"]["id"] for a in get_chat_administrators(chat_id)] if str(chat_id).startswith("-") else []
     is_admin = user_id in admins if user_id else True
 
-    # Welcome new members + verify button
+    # Welcome new members + verify button — ONLY ONE per 60 seconds
     if "new_chat_members" in msg and str(chat_id).startswith("-"):
         if not can_regular_members_send_messages(chat_id):
             pass
@@ -357,53 +357,60 @@ def webhook():
             if chat_id not in join_windows:
                 join_windows[chat_id] = {'last_time': now, 'count': 0}
             window = join_windows[chat_id]
+
+            # Reset window if more than 60 seconds passed
             if now - window['last_time'] > 60:
                 window['count'] = 0
                 window['last_time'] = now
 
-            available = 2 - window['count']
-            num_to_send = min(available, len(new_members)) if available > 0 else 0
+            # We allow ONLY 1 message per 60-second window
+            if window['count'] >= 1:
+                # Skip — already sent one recently
+                pass
+            else:
+                sent_count = 0
+                for member in new_members:
+                    if member["id"] == bot_id:
+                        continue  # bot itself joined — skip
 
-            sent_count = 0
-            for member in new_members:
-                if member["id"] == bot_id:
-                    continue
+                    if sent_count >= 1:  # limit to 1
+                        break
 
-                if sent_count >= num_to_send:
-                    break
+                    username = member.get("username")
+                    mention = f"@{username}" if username else f"<a href=\"tg://user?id={member['id']}\">{member['first_name']}</a>"
 
-                username = member.get("username")
-                mention = f"@{username}" if username else f"<a href=\"tg://user?id={member['id']}\">{member['first_name']}</a>"
+                    welcome_text = (
+                        f"🚨user {mention}!\n\n"
+                        "Please verify yourself to gain full access.\n"
+                        "Click the button below to start verification\n\n"
+                        "<i>Note: This message will be deleted in 60 seconds</i>"
+                    )
 
-                welcome_text = (
-                    f"🚨user {mention}!\n\n"
-                    "Please verify yourself to gain full access.\n"
-                    "Click the button below to start verification\n\n"
-                    "<i>Note: This message will be deleted in 60 seconds</i>"
-                )
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{
+                                "text": "🚀 Start Verification",
+                                "url": f"https://t.me/{bot_info['username']}?start=verify_{chat_id}"
+                            }]
+                        ]
+                    }
 
-                keyboard = {
-                    "inline_keyboard": [
-                        [{
-                            "text": "🚀 Start Verification",
-                            "url": f"https://t.me/{bot_info['username']}?start=verify_{chat_id}"
-                        }]
-                    ]
-                }
+                    resp = send_message(
+                        chat_id=chat_id,
+                        text=welcome_text,
+                        parse_mode="HTML",
+                        reply_markup=keyboard
+                    )
 
-                resp = send_message(
-                    chat_id=chat_id,
-                    text=welcome_text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
+                    if resp.status_code == 200 and resp.json().get("ok"):
+                        sent_msg_id = resp.json()["result"]["message_id"]
+                        threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
+                        sent_count += 1
+                        window['count'] += 1  # count only successful sends
 
-                if resp.status_code == 200 and resp.json().get("ok"):
-                    sent_msg_id = resp.json()["result"]["message_id"]
-                    threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
-                    sent_count += 1
-
-            window['count'] += sent_count
+                # Update last_time only if we actually sent something
+                if sent_count > 0:
+                    window['last_time'] = now
 
     # Album / media group collection
     if "media_group_id" in msg:
@@ -555,7 +562,7 @@ def webhook():
             "interval": interval,
             "is_album": is_album,
             "is_media": is_media,
-            "original_text": original_text   # ← saved for text repeats
+            "original_text": original_text
         }
         repeat_jobs.setdefault(chat_id, []).append(job_ref)
 
