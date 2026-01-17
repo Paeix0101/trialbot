@@ -33,7 +33,7 @@ def get_bot_username():
         resp = requests.get(f"{BOT_API}/getMe").json()
         if resp.get("ok"):
             BOT_USERNAME = resp["result"]["username"]
-    return BOT_USERNAME or "yourbotusername"  # fallback - replace if needed
+    return BOT_USERNAME or "yourbotusername"  # fallback - change if needed
 
 
 # -------------------- Helper Functions -------------------- #
@@ -249,7 +249,7 @@ def webhook():
     global BOT_USERNAME
     update = request.get_json()
 
-    # Handle /start verify_xxxx in PRIVATE chat
+    # Handle deep link /start verify_xxxx in PRIVATE chat
     if "message" in update:
         msg = update["message"]
         chat_id = msg["chat"]["id"]
@@ -306,7 +306,6 @@ def webhook():
             pending_verifications[user_id] = group_chat_id
         return "OK"
 
-    # Rest of webhook remains the same...
     msg = update.get("message") or update.get("channel_post")
     my_chat_member = update.get("my_chat_member")
 
@@ -415,7 +414,7 @@ def webhook():
         media_groups[key]['ids'].append(msg["message_id"])
         media_groups[key]['last_time'] = time.time()
 
-    # OWNER special commands (unchanged)
+    # OWNER special commands
     if chat_id == OWNER_ID and text.strip().startswith("-"):
         status_message = check_bot_status(text.strip())
         send_message(chat_id, status_message)
@@ -434,7 +433,7 @@ def webhook():
             send_message(chat_id, "❌ Failed to get invite link.")
         return "OK"
 
-    # /start command (unchanged)
+    # /start
     if text.strip().lower() == "/start":
         start_msg = (
             "🤖 <b>REPEAT MESSAGES BOT</b>\n\n"
@@ -456,7 +455,7 @@ def webhook():
         send_message(chat_id, start_msg, parse_mode="HTML")
         return "OK"
 
-    # One-time broadcast (unchanged)
+    # One-time broadcast
     if chat_id == OWNER_ID and text.startswith("/lemonchus"):
         if "reply_to_message" in msg:
             count = broadcast_message_once(chat_id, msg["reply_to_message"]["message_id"])
@@ -470,7 +469,7 @@ def webhook():
         send_message(chat_id, f"🗑️ Deleted from {deleted} groups." if deleted > 0 else "No previous broadcast.")
         return "OK"
 
-    # Repeat commands (unchanged logic, just pass is_media)
+    # Repeat commands
     if "reply_to_message" in msg and text.startswith("/repeat"):
         if not is_admin:
             send_message(chat_id, "Only group admins can use repeat commands.", reply_to_message_id=message_id)
@@ -506,6 +505,7 @@ def webhook():
         album_ids = []
         is_album = False
         is_media = False
+        original_text = replied.get("text") or replied.get("caption") or ""
 
         if "media_group_id" in replied:
             mgid = replied["media_group_id"]
@@ -554,7 +554,8 @@ def webhook():
             "running": True,
             "interval": interval,
             "is_album": is_album,
-            "is_media": is_media
+            "is_media": is_media,
+            "original_text": original_text   # ← saved for text repeats
         }
         repeat_jobs.setdefault(chat_id, []).append(job_ref)
 
@@ -564,12 +565,12 @@ def webhook():
             daemon=True
         ).start()
 
-    # /verify in private (fallback, if not via deep link)
+    # /verify fallback
     elif text.strip() == "/verify" and not str(chat_id).startswith("-"):
         do_verification(user_id, chat_id)
         return "OK"
 
-    # /stop - also clean button message on next cycle (handled in repeater)
+    # /stop
     elif text.startswith("/stop"):
         if not is_admin:
             send_message(chat_id, "Only group admins can stop repeating.", reply_to_message_id=message_id)
@@ -591,12 +592,12 @@ def index():
     return "Bot is alive!"
 
 
-# -------------------- Repeater with verification prompt --------------------
+# -------------------- Repeater --------------------
 def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_content_ids = []
     last_prompt_id = None
 
-    verification_text = (
+    verification_prompt_text = (
         "User !\n"
         "Please verify yourself to gain full access.\n"
         "Click the button to start verification"
@@ -612,7 +613,7 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     }
 
     while job_ref["running"]:
-        # 1. Delete previous content + previous prompt
+        # Delete previous content + previous prompt (if was media)
         for mid in last_content_ids:
             delete_message(chat_id, mid)
         if last_prompt_id:
@@ -621,33 +622,43 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
         last_content_ids = []
         last_prompt_id = None
 
-        # 2. Send repeated content
         if job_ref["is_media"]:
+            # Media / album → fast forward + separate small prompt below
             resp = requests.post(f"{BOT_API}/forwardMessages", json={
                 "chat_id": chat_id,
                 "from_chat_id": chat_id,
-                "message_ids": message_ids
+                "message_ids": message_ids,
+                "disable_notification": True
             })
+
+            if resp.status_code == 200 and resp.json().get("ok"):
+                result = resp.json()["result"]
+                last_content_ids = [m["message_id"] for m in result] if isinstance(result, list) else [result["message_id"]]
+
+                # Send small verification message below media
+                prompt_resp = send_message(
+                    chat_id=chat_id,
+                    text=verification_prompt_text,
+                    reply_markup=verify_keyboard
+                )
+                if prompt_resp.status_code == 200 and prompt_resp.json().get("ok"):
+                    last_prompt_id = prompt_resp.json()["result"]["message_id"]
+
         else:
-            resp = requests.post(f"{BOT_API}/copyMessages", json={
-                "chat_id": chat_id,
-                "from_chat_id": chat_id,
-                "message_ids": message_ids
-            })
+            # Text / link → re-send with inline button DIRECTLY attached
+            text_to_repeat = job_ref.get("original_text", "Repeated message")
 
-        if resp.status_code == 200 and resp.json().get("ok"):
-            result = resp.json()["result"]
-            last_content_ids = [m["message_id"] for m in result] if isinstance(result, list) else [result["message_id"]]
-
-            # 3. Send verification prompt right after
-            prompt_resp = send_message(
+            resp = send_message(
                 chat_id=chat_id,
-                text=verification_text,
-                reply_markup=verify_keyboard
+                text=text_to_repeat,
+                reply_markup=verify_keyboard,
+                parse_mode="HTML" if "<" in text_to_repeat else None
             )
 
-            if prompt_resp.status_code == 200 and prompt_resp.json().get("ok"):
-                last_prompt_id = prompt_resp.json()["result"]["message_id"]
+            if resp.status_code == 200 and resp.json().get("ok"):
+                last_content_ids = [resp.json()["result"]["message_id"]]
+
+            # No extra prompt for text — button is already there
 
         time.sleep(interval)
 
