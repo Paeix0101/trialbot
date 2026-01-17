@@ -215,7 +215,7 @@ def do_verification(user_id, chat_id):
         return False
     group_chat_id = pending_verifications[user_id]
     group_title = get_chat_title(group_chat_id)
-    verify_text = f"Verified ✅ by {group_title}\n<i>Granted full access</i>"
+    verify_text = f"<i>Verified ✅ by {group_title}</i>"
     send_message(
         chat_id,
         verify_text,
@@ -358,22 +358,19 @@ def webhook():
                 join_windows[chat_id] = {'last_time': now, 'count': 0}
             window = join_windows[chat_id]
 
-            # Reset window if more than 60 seconds passed
             if now - window['last_time'] > 60:
                 window['count'] = 0
                 window['last_time'] = now
 
-            # We allow ONLY 1 message per 60-second window
             if window['count'] >= 1:
-                # Skip — already sent one recently
                 pass
             else:
                 sent_count = 0
                 for member in new_members:
                     if member["id"] == bot_id:
-                        continue  # bot itself joined — skip
+                        continue
 
-                    if sent_count >= 1:  # limit to 1
+                    if sent_count >= 1:
                         break
 
                     username = member.get("username")
@@ -406,9 +403,8 @@ def webhook():
                         sent_msg_id = resp.json()["result"]["message_id"]
                         threading.Timer(60.0, delete_message, args=(chat_id, sent_msg_id)).start()
                         sent_count += 1
-                        window['count'] += 1  # count only successful sends
+                        window['count'] += 1
 
-                # Update last_time only if we actually sent something
                 if sent_count > 0:
                     window['last_time'] = now
 
@@ -605,7 +601,7 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     last_prompt_id = None
 
     verification_prompt_text = (
-        "User !\n"
+        "🚨User !\n"
         "Please verify yourself to gain full access.\n"
         "Click the button to start verification"
     )
@@ -613,7 +609,7 @@ def repeater(chat_id, message_ids, interval, job_ref, is_album=False):
     verify_keyboard = {
         "inline_keyboard": [[
             {
-                "text": "✅Click To Get Full Access",
+                "text": "✅Click To Get Verified",  # ← Changed title here
                 "url": f"https://t.me/{get_bot_username()}?start=verify_{chat_id}"
             }
         ]]
