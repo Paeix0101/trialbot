@@ -657,9 +657,16 @@ public class Bot {
             jobRef.put("is_media", isMedia);
             jobRef.put("original_text", originalText);
 
+            // Make variables effectively final for the lambda
+            final long finalChatId = chatId;
+            final List<Long> finalAlbumIds = albumIds;
+            final long finalInterval = interval;
+            final boolean finalIsAlbum = isAlbum;
+            final Map<String, Object> finalJobRef = jobRef;
+
             repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(jobRef);
 
-            new Thread(() -> repeater(chatId, albumIds, interval, jobRef, isAlbum)).start();
+            new Thread(() -> repeater(finalChatId, finalAlbumIds, finalInterval, finalJobRef, finalIsAlbum)).start();
             return "OK";
         }
 
