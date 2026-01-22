@@ -37,27 +37,22 @@ public class Bot {
 
     public static void main(String[] args) {
         getBotUsername();
-
         try {
             Request request = new Request.Builder().url(BOT_API + "/setWebhook?url=" + WEBHOOK_URL + "/webhook").build();
             client.newCall(request).execute();
         } catch (IOException e) {
             e.printStackTrace();
         }
-
         // Use lambda instead of method reference to avoid ordering issues
         new Thread(() -> keepAlive()).start();
         new Thread(() -> cleanupOldAlbums()).start();
         new Thread(() -> sendUserBatch()).start();
-
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "5000"));
         Spark.port(port);
-
         Spark.post("/webhook", (req, res) -> {
             JsonObject update = gson.fromJson(req.body(), JsonObject.class);
             return webhook(update);
         });
-
         Spark.get("/", (req, res) -> "Bot is alive!");
     }
 
@@ -77,10 +72,6 @@ public class Bot {
         return BOT_USERNAME != null ? BOT_USERNAME : "yourbotusername";
     }
 
-    // ────────────────────────────────────────────────
-    // ALL METHODS DEFINED BEFORE THEY ARE CALLED
-    // ────────────────────────────────────────────────
-
     private static Response sendMessage(long chatId, String text, String parseMode, Long replyToMessageId, JsonObject replyMarkup) throws IOException {
         JsonObject payload = new JsonObject();
         payload.addProperty("chat_id", chatId);
@@ -88,7 +79,6 @@ public class Bot {
         if (parseMode != null) payload.addProperty("parse_mode", parseMode);
         if (replyToMessageId != null) payload.addProperty("reply_to_message_id", replyToMessageId);
         if (replyMarkup != null) payload.add("reply_markup", replyMarkup);
-
         RequestBody body = RequestBody.create(gson.toJson(payload), MediaType.get("application/json"));
         Request request = new Request.Builder().url(BOT_API + "/sendMessage").post(body).build();
         Response response = client.newCall(request).execute();
@@ -373,7 +363,7 @@ public class Bot {
         if (update.has("message")) {
             JsonObject msg = update.getAsJsonObject("message");
             long chatId = msg.getAsJsonObject("chat").get("id").getAsLong();
-            String text = msg.has("text") ? msg.get("text").getAsString().trim() : "";
+            String text = msg.has("text") ? msg.get("text").getAsString().trim() : ""; // FIXED HERE
             long userId = msg.getAsJsonObject("from").get("id").getAsLong();
             if (!String.valueOf(chatId).startsWith("-") && text.startsWith("/start")) {
                 Pattern pattern = Pattern.compile("^/start\\s+verify_(-?\\d+)$");
@@ -423,7 +413,7 @@ public class Bot {
         if (msg == null) return "OK";
 
         long chatId = msg.getAsJsonObject("chat").get("id").getAsLong();
-        String text = msg.has("text") ? msg.get("text").getAsString().trim() : "";
+        String text = msg.has("text") ? msg.get("text").getAsString().trim() : ""; // FIXED HERE
         JsonObject fromUser = msg.has("from") ? msg.getAsJsonObject("from") : new JsonObject();
         long messageId = msg.get("message_id").getAsLong();
         long userId = fromUser.has("id") ? fromUser.get("id").getAsLong() : 0;
@@ -600,9 +590,7 @@ public class Bot {
                 } else {
                     albumIds.add(replied.get("message_id").getAsLong());
                 }
-
                 System.out.println("[ALBUM DETECT] chat=" + chatId + " | mgid=" + mgid + " | items=" + albumIds.size() + " | ids=" + albumIds);
-
                 if (albumIds.size() > 1) {
                     isAlbum = true;
                     String resultText = "**✓ Album detected** (" + albumIds.size() + " items)\nWill repeat every " + display + ".";
@@ -654,17 +642,13 @@ public class Bot {
             final Map<String, Object> finalJobRef = jobRef;
 
             repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(jobRef);
-
             new Thread(() -> repeater(finalChatId, finalAlbumIds, finalInterval, finalJobRef, finalIsAlbum)).start();
-
             return "OK";
         }
-
         else if (text.trim().equals("/verify") && !String.valueOf(chatId).startsWith("-")) {
             doVerification(userId, chatId);
             return "OK";
         }
-
         else if (text.startsWith("/stop")) {
             if (!isAdmin) {
                 try {
@@ -723,7 +707,6 @@ public class Bot {
             if (lastPromptId != null) {
                 deleteMessage(chatId, lastPromptId);
             }
-
             lastContentIds.clear();
             lastPromptId = null;
 
