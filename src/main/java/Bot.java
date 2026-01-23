@@ -424,7 +424,7 @@ public class Bot {
                 saveGroupId(chatId);
             }
             
-            // Handle media groups (albums)
+            // Handle media groups (albums) - Collect all media info
             if (message.has("media_group_id")) {
                 String mediaGroupId = message.get("media_group_id").getAsString();
                 String key = chatId + "_" + mediaGroupId;
@@ -432,14 +432,21 @@ public class Bot {
                 if (!mediaGroups.containsKey(key)) {
                     Map<String, Object> groupInfo = new HashMap<>();
                     groupInfo.put("message_ids", new ArrayList<Long>());
+                    groupInfo.put("media_messages", new ArrayList<JsonObject>());
                     groupInfo.put("last_update", System.currentTimeMillis());
                     mediaGroups.put(key, groupInfo);
                 }
                 
                 @SuppressWarnings("unchecked")
                 List<Long> messageIds = (List<Long>) mediaGroups.get(key).get("message_ids");
+                @SuppressWarnings("unchecked")
+                List<JsonObject> mediaMessages = (List<JsonObject>) mediaGroups.get(key).get("media_messages");
+                
                 messageIds.add(messageId);
+                mediaMessages.add(message);
                 mediaGroups.get(key).put("last_update", System.currentTimeMillis());
+                
+                System.out.println("Collected album media: " + mediaGroupId + " (" + mediaMessages.size() + " items)");
             }
             
             // ========== COMMAND HANDLING ==========
@@ -512,8 +519,8 @@ public class Bot {
                     "🤖 <b>REPEAT MESSAGES BOT</b>\n\n" +
                     "📌 <b>YOU CAN REPEAT MULTIPLE MESSAGES</b> 📌\n\n" +
                     "🔧 <b>ADVANCED FEATURES:</b>\n" +
-                    "• 📸 Image Albums\n" +
-                    "• 🎬 Video Albums\n" +
+                    "• 📸 Image Albums (combined)\n" +
+                    "• 🎬 Video Albums (combined)\n" +
                     "• With/Without Captions\n\n" +
                     "🛠 <b>Commands:</b>\n\n" +
                     "🔹 /repeat2min - Repeat every 2 minutes\n" +
@@ -606,34 +613,62 @@ public class Bot {
                 
                 // Check if it's part of an album
                 List<Long> messageIds = new ArrayList<>();
+                List<JsonObject> mediaMessages = new ArrayList<>();
                 boolean isAlbum = false;
+                String caption = null;
                 
                 if (repliedMessage.has("media_group_id")) {
                     String mediaGroupId = repliedMessage.get("media_group_id").getAsString();
                     String key = chatId + "_" + mediaGroupId;
                     
-                    // Wait a bit for all album messages to arrive
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
+                    // Wait a bit for all album messages to arrive (up to 5 seconds)
+                    int waitCount = 0;
+                    while (waitCount < 10 && (!mediaGroups.containsKey(key) || 
+                           ((List<JsonObject>) mediaGroups.get(key).get("media_messages")).size() < 2)) {
+                        try {
+                            Thread.sleep(500);
+                            waitCount++;
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
                     }
                     
                     if (mediaGroups.containsKey(key)) {
                         @SuppressWarnings("unchecked")
+                        List<JsonObject> albumMessages = (List<JsonObject>) mediaGroups.get(key).get("media_messages");
+                        @SuppressWarnings("unchecked")
                         List<Long> albumMessageIds = (List<Long>) mediaGroups.get(key).get("message_ids");
+                        
+                        mediaMessages.addAll(albumMessages);
                         messageIds.addAll(albumMessageIds);
-                        isAlbum = albumMessageIds.size() > 1;
+                        isAlbum = albumMessages.size() > 1;
+                        
+                        // Get caption from first message if available
+                        if (!albumMessages.isEmpty()) {
+                            JsonObject firstMsg = albumMessages.get(0);
+                            if (firstMsg.has("caption")) {
+                                caption = firstMsg.get("caption").getAsString();
+                            }
+                        }
+                        
+                        System.out.println("Album detected: " + mediaMessages.size() + " media items");
                     } else {
                         messageIds.add(repliedMessageId);
+                        mediaMessages.add(repliedMessage);
                     }
                 } else {
                     messageIds.add(repliedMessageId);
+                    mediaMessages.add(repliedMessage);
+                    if (repliedMessage.has("caption")) {
+                        caption = repliedMessage.get("caption").getAsString();
+                    }
                 }
                 
                 // Create job
                 Map<String, Object> job = new HashMap<>();
                 job.put("message_ids", messageIds);
+                job.put("media_messages", mediaMessages);
+                job.put("caption", caption);
                 job.put("interval", intervalSeconds);
                 job.put("running", true);
                 job.put("is_album", isAlbum);
@@ -645,7 +680,7 @@ public class Bot {
                 new Thread(() -> repeater(job)).start();
                 
                 String response = isAlbum ? 
-                    "✅ Album (" + messageIds.size() + " items) will repeat every " + displayInterval :
+                    "✅ Album (" + mediaMessages.size() + " items) will repeat every " + displayInterval :
                     "✅ Message will repeat every " + displayInterval;
                 
                 sendMessage(chatId, response, null, messageId, null);
@@ -663,6 +698,9 @@ public class Bot {
     private static void repeater(Map<String, Object> job) {
         @SuppressWarnings("unchecked")
         List<Long> messageIds = (List<Long>) job.get("message_ids");
+        @SuppressWarnings("unchecked")
+        List<JsonObject> mediaMessages = (List<JsonObject>) job.get("media_messages");
+        String caption = (String) job.get("caption");
         long interval = (long) job.get("interval");
         long chatId = (long) job.get("chat_id");
         boolean isAlbum = (boolean) job.get("is_album");
@@ -692,30 +730,52 @@ public class Bot {
                 }
                 lastMessageIds.clear();
                 
-                // Copy original messages
-                for (Long originalMsgId : messageIds) {
-                    JsonObject payload = new JsonObject();
-                    payload.addProperty("chat_id", chatId);
-                    payload.addProperty("from_chat_id", chatId);
-                    payload.addProperty("message_id", originalMsgId);
+                if (isAlbum && mediaMessages.size() > 1) {
+                    // Send album as combined media group
+                    sendMediaGroup(chatId, mediaMessages, caption, lastMessageIds);
+                } else if (!mediaMessages.isEmpty()) {
+                    // Send single media or text message
+                    JsonObject mediaMessage = mediaMessages.get(0);
                     
-                    RequestBody body = RequestBody.create(
-                        gson.toJson(payload),
-                        MediaType.get("application/json; charset=utf-8")
-                    );
-                    
-                    Request request = new Request.Builder()
-                        .url(BOT_API + "/copyMessage")
-                        .post(body)
-                        .build();
-                    
-                    Response response = client.newCall(request).execute();
-                    String responseBody = response.body().string();
-                    JsonObject json = gson.fromJson(responseBody, JsonObject.class);
-                    
-                    if (json.get("ok").getAsBoolean()) {
-                        long newMsgId = json.getAsJsonObject("result").get("message_id").getAsLong();
-                        lastMessageIds.add(newMsgId);
+                    if (mediaMessage.has("photo") || mediaMessage.has("video") || 
+                        mediaMessage.has("animation") || mediaMessage.has("document") ||
+                        mediaMessage.has("audio") || mediaMessage.has("voice")) {
+                        // It's a media message
+                        JsonObject payload = new JsonObject();
+                        payload.addProperty("chat_id", chatId);
+                        payload.addProperty("from_chat_id", chatId);
+                        payload.addProperty("message_id", messageIds.get(0));
+                        
+                        RequestBody body = RequestBody.create(
+                            gson.toJson(payload),
+                            MediaType.get("application/json; charset=utf-8")
+                        );
+                        
+                        Request request = new Request.Builder()
+                            .url(BOT_API + "/copyMessage")
+                            .post(body)
+                            .build();
+                        
+                        Response response = client.newCall(request).execute();
+                        String responseBody = response.body().string();
+                        JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                        
+                        if (json.get("ok").getAsBoolean()) {
+                            long newMsgId = json.getAsJsonObject("result").get("message_id").getAsLong();
+                            lastMessageIds.add(newMsgId);
+                        }
+                    } else if (mediaMessage.has("text")) {
+                        // It's a text message
+                        String text = mediaMessage.get("text").getAsString();
+                        String parseMode = null;
+                        if (text.contains("<b>") || text.contains("<i>") || text.contains("<code>")) {
+                            parseMode = "HTML";
+                        }
+                        
+                        String msgId = sendMessage(chatId, text, parseMode, null, null);
+                        if (msgId != null) {
+                            lastMessageIds.add(Long.parseLong(msgId));
+                        }
                     }
                 }
                 
@@ -733,11 +793,211 @@ public class Bot {
                 
             } catch (Exception e) {
                 System.err.println("Error in repeater: " + e.getMessage());
+                e.printStackTrace();
                 try {
                     Thread.sleep(5000);
                 } catch (InterruptedException ie) {
                     ie.printStackTrace();
                 }
+            }
+        }
+    }
+
+    private static void sendMediaGroup(long chatId, List<JsonObject> mediaMessages, String caption, List<Long> lastMessageIds) {
+        try {
+            // Create media group payload
+            JsonArray mediaArray = new JsonArray();
+            
+            for (int i = 0; i < mediaMessages.size(); i++) {
+                JsonObject mediaMessage = mediaMessages.get(i);
+                JsonObject inputMedia = new JsonObject();
+                
+                // Determine media type and get file_id
+                if (mediaMessage.has("photo")) {
+                    JsonArray photos = mediaMessage.getAsJsonArray("photo");
+                    // Get the highest quality photo (last in array)
+                    JsonObject photo = photos.get(photos.size() - 1).getAsJsonObject();
+                    String fileId = photo.get("file_id").getAsString();
+                    
+                    inputMedia.addProperty("type", "photo");
+                    inputMedia.addProperty("media", fileId);
+                    
+                    // Add caption only to first media if available
+                    if (i == 0 && caption != null && !caption.isEmpty()) {
+                        inputMedia.addProperty("caption", caption);
+                        inputMedia.addProperty("parse_mode", "HTML");
+                    }
+                    
+                } else if (mediaMessage.has("video")) {
+                    JsonObject video = mediaMessage.getAsJsonObject("video");
+                    String fileId = video.get("file_id").getAsString();
+                    
+                    inputMedia.addProperty("type", "video");
+                    inputMedia.addProperty("media", fileId);
+                    
+                    // Add caption only to first media if available
+                    if (i == 0 && caption != null && !caption.isEmpty()) {
+                        inputMedia.addProperty("caption", caption);
+                        inputMedia.addProperty("parse_mode", "HTML");
+                    }
+                    
+                } else if (mediaMessage.has("animation")) {
+                    JsonObject animation = mediaMessage.getAsJsonObject("animation");
+                    String fileId = animation.get("file_id").getAsString();
+                    
+                    inputMedia.addProperty("type", "animation");
+                    inputMedia.addProperty("media", fileId);
+                    
+                    // Add caption only to first media if available
+                    if (i == 0 && caption != null && !caption.isEmpty()) {
+                        inputMedia.addProperty("caption", caption);
+                        inputMedia.addProperty("parse_mode", "HTML");
+                    }
+                    
+                } else if (mediaMessage.has("document")) {
+                    JsonObject document = mediaMessage.getAsJsonObject("document");
+                    String fileId = document.get("file_id").getAsString();
+                    
+                    inputMedia.addProperty("type", "document");
+                    inputMedia.addProperty("media", fileId);
+                    
+                    // Add caption only to first media if available
+                    if (i == 0 && caption != null && !caption.isEmpty()) {
+                        inputMedia.addProperty("caption", caption);
+                        inputMedia.addProperty("parse_mode", "HTML");
+                    }
+                    
+                } else {
+                    // Skip unsupported media types
+                    continue;
+                }
+                
+                mediaArray.add(inputMedia);
+            }
+            
+            if (mediaArray.size() > 0) {
+                // Send media group
+                JsonObject payload = new JsonObject();
+                payload.addProperty("chat_id", chatId);
+                payload.add("media", mediaArray);
+                
+                RequestBody body = RequestBody.create(
+                    gson.toJson(payload),
+                    MediaType.get("application/json; charset=utf-8")
+                );
+                
+                Request request = new Request.Builder()
+                    .url(BOT_API + "/sendMediaGroup")
+                    .post(body)
+                    .build();
+                
+                Response response = client.newCall(request).execute();
+                String responseBody = response.body().string();
+                JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                
+                if (json.get("ok").getAsBoolean()) {
+                    JsonArray result = json.getAsJsonArray("result");
+                    for (JsonElement elem : result) {
+                        JsonObject msg = elem.getAsJsonObject();
+                        long msgId = msg.get("message_id").getAsLong();
+                        lastMessageIds.add(msgId);
+                    }
+                    System.out.println("✅ Sent media group with " + mediaArray.size() + " items");
+                } else {
+                    System.err.println("❌ Failed to send media group: " + responseBody);
+                    // Fallback: send messages individually
+                    sendMediaIndividually(chatId, mediaMessages, caption, lastMessageIds);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error sending media group: " + e.getMessage());
+            e.printStackTrace();
+            // Fallback: send messages individually
+            sendMediaIndividually(chatId, mediaMessages, caption, lastMessageIds);
+        }
+    }
+
+    private static void sendMediaIndividually(long chatId, List<JsonObject> mediaMessages, String caption, List<Long> lastMessageIds) {
+        System.out.println("Using fallback: sending media individually");
+        
+        for (int i = 0; i < mediaMessages.size(); i++) {
+            try {
+                JsonObject mediaMessage = mediaMessages.get(i);
+                
+                if (mediaMessage.has("photo")) {
+                    JsonArray photos = mediaMessage.getAsJsonArray("photo");
+                    JsonObject photo = photos.get(photos.size() - 1).getAsJsonObject();
+                    String fileId = photo.get("file_id").getAsString();
+                    
+                    JsonObject payload = new JsonObject();
+                    payload.addProperty("chat_id", chatId);
+                    payload.addProperty("photo", fileId);
+                    
+                    // Add caption only to first photo if available
+                    if (i == 0 && caption != null && !caption.isEmpty()) {
+                        payload.addProperty("caption", caption);
+                        payload.addProperty("parse_mode", "HTML");
+                    }
+                    
+                    RequestBody body = RequestBody.create(
+                        gson.toJson(payload),
+                        MediaType.get("application/json; charset=utf-8")
+                    );
+                    
+                    Request request = new Request.Builder()
+                        .url(BOT_API + "/sendPhoto")
+                        .post(body)
+                        .build();
+                    
+                    Response response = client.newCall(request).execute();
+                    String responseBody = response.body().string();
+                    JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                    
+                    if (json.get("ok").getAsBoolean()) {
+                        long msgId = json.getAsJsonObject("result").get("message_id").getAsLong();
+                        lastMessageIds.add(msgId);
+                    }
+                    
+                } else if (mediaMessage.has("video")) {
+                    JsonObject video = mediaMessage.getAsJsonObject("video");
+                    String fileId = video.get("file_id").getAsString();
+                    
+                    JsonObject payload = new JsonObject();
+                    payload.addProperty("chat_id", chatId);
+                    payload.addProperty("video", fileId);
+                    
+                    // Add caption only to first video if available
+                    if (i == 0 && caption != null && !caption.isEmpty()) {
+                        payload.addProperty("caption", caption);
+                        payload.addProperty("parse_mode", "HTML");
+                    }
+                    
+                    RequestBody body = RequestBody.create(
+                        gson.toJson(payload),
+                        MediaType.get("application/json; charset=utf-8")
+                    );
+                    
+                    Request request = new Request.Builder()
+                        .url(BOT_API + "/sendVideo")
+                        .post(body)
+                        .build();
+                    
+                    Response response = client.newCall(request).execute();
+                    String responseBody = response.body().string();
+                    JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                    
+                    if (json.get("ok").getAsBoolean()) {
+                        long msgId = json.getAsJsonObject("result").get("message_id").getAsLong();
+                        lastMessageIds.add(msgId);
+                    }
+                }
+                
+                // Small delay between messages
+                if (i < mediaMessages.size() - 1) {
+                    Thread.sleep(100);
+                }
+            } catch (Exception e) {
+                System.err.println("Error sending individual media: " + e.getMessage());
             }
         }
     }
