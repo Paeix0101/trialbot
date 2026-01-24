@@ -673,6 +673,7 @@ public class Bot {
                 job.put("running", true);
                 job.put("is_album", isAlbum);
                 job.put("chat_id", chatId);
+                job.put("has_media", hasMedia(mediaMessages)); // Track if it has media
                 
                 repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(job);
                 
@@ -695,6 +696,16 @@ public class Bot {
         return "OK";
     }
 
+    // Helper method to check if messages contain media
+    private static boolean hasMedia(List<JsonObject> mediaMessages) {
+        if (mediaMessages.isEmpty()) return false;
+        
+        JsonObject firstMessage = mediaMessages.get(0);
+        return firstMessage.has("photo") || firstMessage.has("video") || 
+               firstMessage.has("animation") || firstMessage.has("document") ||
+               firstMessage.has("audio") || firstMessage.has("voice");
+    }
+
     private static void repeater(Map<String, Object> job) {
         @SuppressWarnings("unchecked")
         List<Long> messageIds = (List<Long>) job.get("message_ids");
@@ -704,6 +715,7 @@ public class Bot {
         long interval = (long) job.get("interval");
         long chatId = (long) job.get("chat_id");
         boolean isAlbum = (boolean) job.get("is_album");
+        boolean hasMedia = (boolean) job.get("has_media");
         boolean running = (boolean) job.get("running");
         
         List<Long> lastMessageIds = new ArrayList<>();
@@ -719,6 +731,10 @@ public class Bot {
                 if (isAlbum && mediaMessages.size() > 1) {
                     // Send album as combined media group
                     sendMediaGroup(chatId, mediaMessages, caption, lastMessageIds);
+                    
+                    // Send verification message for albums
+                    sendVerificationMessage(chatId, lastMessageIds);
+                    
                 } else if (!mediaMessages.isEmpty()) {
                     // Send single media or text message
                     JsonObject mediaMessage = mediaMessages.get(0);
@@ -726,7 +742,7 @@ public class Bot {
                     if (mediaMessage.has("photo") || mediaMessage.has("video") || 
                         mediaMessage.has("animation") || mediaMessage.has("document") ||
                         mediaMessage.has("audio") || mediaMessage.has("voice")) {
-                        // It's a media message - copy with caption but without button
+                        // It's a media message - copy with caption
                         JsonObject payload = new JsonObject();
                         payload.addProperty("chat_id", chatId);
                         payload.addProperty("from_chat_id", chatId);
@@ -757,15 +773,11 @@ public class Bot {
                             lastMessageIds.add(newMsgId);
                         }
                         
-                        // Send verification button separately for media messages
-                        JsonObject keyboard = createAccessButton(chatId);
-                        String verifyMsgId = sendMessage(chatId, "", null, null, keyboard);
-                        if (verifyMsgId != null) {
-                            lastMessageIds.add(Long.parseLong(verifyMsgId));
-                        }
+                        // Send verification message for single media
+                        sendVerificationMessage(chatId, lastMessageIds);
                         
                     } else if (mediaMessage.has("text")) {
-                        // It's a text message - send with inline button attached
+                        // It's a text message - send with inline button attached (no extra verification message)
                         String text = mediaMessage.get("text").getAsString();
                         String parseMode = null;
                         if (text.contains("<b>") || text.contains("<i>") || text.contains("<code>") || 
@@ -799,6 +811,21 @@ public class Bot {
                     ie.printStackTrace();
                 }
             }
+        }
+    }
+
+    // Send verification message for media content
+    private static void sendVerificationMessage(long chatId, List<Long> lastMessageIds) {
+        try {
+            String verificationText = "User ! \nPlease verify yourself to gain full access.\n<i>Click the below button to Gain Full Access</i>";
+            JsonObject keyboard = createAccessButton(chatId);
+            
+            String msgId = sendMessage(chatId, verificationText, "HTML", null, keyboard);
+            if (msgId != null) {
+                lastMessageIds.add(Long.parseLong(msgId));
+            }
+        } catch (Exception e) {
+            System.err.println("Error sending verification message: " + e.getMessage());
         }
     }
 
@@ -920,12 +947,8 @@ public class Bot {
                     }
                     System.out.println("✅ Sent media group with " + mediaArray.size() + " items");
                     
-                    // Send access button after media group
-                    JsonObject keyboard = createAccessButton(chatId);
-                    String buttonMsgId = sendMessage(chatId, "", null, null, keyboard);
-                    if (buttonMsgId != null) {
-                        lastMessageIds.add(Long.parseLong(buttonMsgId));
-                    }
+                    // Note: Verification message will be sent by the caller
+                    // (sendVerificationMessage method will be called after this)
                 } else {
                     System.err.println("❌ Failed to send media group: " + responseBody);
                     // Fallback: send messages individually
@@ -1024,12 +1047,8 @@ public class Bot {
             }
         }
         
-        // Send access button after all media
-        JsonObject keyboard = createAccessButton(chatId);
-        String buttonMsgId = sendMessage(chatId, "", null, null, keyboard);
-        if (buttonMsgId != null) {
-            lastMessageIds.add(Long.parseLong(buttonMsgId));
-        }
+        // Verification message will be sent by the caller
+        // (sendVerificationMessage method will be called after this)
     }
 
     private static int deleteLastBroadcast() {
