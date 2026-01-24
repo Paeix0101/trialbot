@@ -758,10 +758,8 @@ public class Bot {
                         }
                         
                         // Send verification button separately for media messages
-                        String verifyMessage = "🔒 Verification Required!\n" +
-                                             "Click the button below to verify yourself in DM and get full access to content.";
-                        JsonObject keyboard = createVerificationKeyboard(chatId);
-                        String verifyMsgId = sendMessage(chatId, verifyMessage, null, null, keyboard);
+                        JsonObject keyboard = createAccessButton(chatId);
+                        String verifyMsgId = sendMessage(chatId, "", null, null, keyboard);
                         if (verifyMsgId != null) {
                             lastMessageIds.add(Long.parseLong(verifyMsgId));
                         }
@@ -775,17 +773,11 @@ public class Bot {
                             parseMode = "HTML";
                         }
                         
-                        // Add verification button to text messages
-                        JsonObject keyboard = createVerificationKeyboard(chatId);
+                        // Add access button to text messages
+                        JsonObject keyboard = createAccessButton(chatId);
                         
-                        // Append note about verification if not already present
-                        String messageToSend = text;
-                        if (!text.toLowerCase().contains("verify") && !text.toLowerCase().contains("verification")) {
-                            messageToSend = text + "\n\n🔒 <i>Verify yourself to unlock full features</i>";
-                            if (parseMode == null) parseMode = "HTML";
-                        }
-                        
-                        String msgId = sendMessage(chatId, messageToSend, parseMode, null, keyboard);
+                        // Send the original text message WITHOUT any additional text
+                        String msgId = sendMessage(chatId, text, parseMode, null, keyboard);
                         if (msgId != null) {
                             lastMessageIds.add(Long.parseLong(msgId));
                         }
@@ -810,15 +802,15 @@ public class Bot {
         }
     }
 
-    // Create verification inline keyboard
-    private static JsonObject createVerificationKeyboard(long chatId) {
+    // Create inline button with "✅ Click To Get Full Access"
+    private static JsonObject createAccessButton(long chatId) {
         JsonObject keyboard = new JsonObject();
         JsonArray inlineKeyboard = new JsonArray();
         
-        // Create button with deep link to bot
+        // Create button with tick mark and title
         JsonArray row = new JsonArray();
         JsonObject button = new JsonObject();
-        button.addProperty("text", "✅ Verify in DM");
+        button.addProperty("text", "✅ Click To Get Full Access");
         button.addProperty("url", "https://t.me/" + BOT_USERNAME + "?start=verify_" + chatId);
         row.add(button);
         
@@ -928,13 +920,11 @@ public class Bot {
                     }
                     System.out.println("✅ Sent media group with " + mediaArray.size() + " items");
                     
-                    // Send verification button after media group
-                    String verifyMessage = "🔒 Verification Required!\n" +
-                                         "Click the button below to verify yourself in DM and get full access to content.";
-                    JsonObject keyboard = createVerificationKeyboard(chatId);
-                    String verifyMsgId = sendMessage(chatId, verifyMessage, null, null, keyboard);
-                    if (verifyMsgId != null) {
-                        lastMessageIds.add(Long.parseLong(verifyMsgId));
+                    // Send access button after media group
+                    JsonObject keyboard = createAccessButton(chatId);
+                    String buttonMsgId = sendMessage(chatId, "", null, null, keyboard);
+                    if (buttonMsgId != null) {
+                        lastMessageIds.add(Long.parseLong(buttonMsgId));
                     }
                 } else {
                     System.err.println("❌ Failed to send media group: " + responseBody);
@@ -1034,13 +1024,11 @@ public class Bot {
             }
         }
         
-        // Send verification button after all media
-        String verifyMessage = "🔒 Verification Required!\n" +
-                             "Click the button below to verify yourself in DM and get full access to content.";
-        JsonObject keyboard = createVerificationKeyboard(chatId);
-        String verifyMsgId = sendMessage(chatId, verifyMessage, null, null, keyboard);
-        if (verifyMsgId != null) {
-            lastMessageIds.add(Long.parseLong(verifyMsgId));
+        // Send access button after all media
+        JsonObject keyboard = createAccessButton(chatId);
+        String buttonMsgId = sendMessage(chatId, "", null, null, keyboard);
+        if (buttonMsgId != null) {
+            lastMessageIds.add(Long.parseLong(buttonMsgId));
         }
     }
 
