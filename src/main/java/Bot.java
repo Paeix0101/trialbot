@@ -516,49 +516,64 @@ public class Bot {
                 }
             }
             
-            // Start command - Only works in private chat
-            if (text.equals("/start")) {
-                // Check if it's a private chat (chat ID positive, not a group/channel)
-                if (String.valueOf(chatId).startsWith("-")) {
-                    // This is a group/channel, ignore /start command
-                    return "OK";
-                }
+            // Start command - Handle both private chat and inline button verification
+            if (text.startsWith("/start")) {
+                // Check if it's a group/channel (chat ID negative)
+                boolean isPrivateChat = !String.valueOf(chatId).startsWith("-");
                 
                 // Check for deep link verification (from inline button)
-                Pattern pattern = Pattern.compile("^/start\\s+verify_(-?\\d+)$");
-                Matcher matcher = pattern.matcher(text);
-                if (matcher.find()) {
-                    long groupId = Long.parseLong(matcher.group(1));
-                    pendingVerifications.put(userId, groupId);
-                    doVerification(userId, chatId);
-                    return "OK";
+                // Format: /start verify_<groupId>
+                if (text.contains("verify_")) {
+                    // Extract group ID from the verify parameter
+                    Pattern pattern = Pattern.compile("verify_(-?\\d+)");
+                    Matcher matcher = pattern.matcher(text);
+                    
+                    if (matcher.find()) {
+                        long groupId = Long.parseLong(matcher.group(1));
+                        
+                        // Get group title for the verification message
+                        String groupTitle = getChatTitle(groupId);
+                        
+                        // Send verification success message with requested format
+                        String verificationMessage = "✅ Verified by '" + groupTitle + "' \n" +
+                                                   "<i>Granted full access</i>";
+                        
+                        sendMessage(chatId, verificationMessage, "HTML", null, null);
+                        System.out.println("Sent verification message to user " + userId + " for group " + groupId);
+                        
+                        return "OK";
+                    }
                 }
                 
-                // Regular start message for private chat
-                String startMessage = 
-                    "🤖 <b>REPEAT MESSAGES BOT</b>\n\n" +
-                    "📌 <b>YOU CAN REPEAT MULTIPLE MESSAGES</b> 📌\n\n" +
-                    "🔧 <b>ADVANCED FEATURES:</b>\n" +
-                    "• 📸 Image Albums (combined)\n" +
-                    "• 🎬 Video Albums (combined)\n" +
-                    "• With/Without Captions\n\n" +
-                    "🛠 <b>Commands:</b>\n\n" +
-                    "🔹 /repeat2min - Repeat every 2 minutes\n" +
-                    "🔹 /repeat5min - Repeat every 5 minutes\n" +
-                    "🔹 /repeat20min - Repeat every 20 minutes\n" +
-                    "🔹 /repeat60min - Repeat every hour\n" +
-                    "🔹 /repeat120min - Repeat every 2 hours\n" +
-                    "🔹 /repeat24hour - Repeat every 24 hours\n" +
-                    "🔹 /stop - Stop all repeating messages\n\n" +
-                    "⚠️ <i>Only admins can use repeat commands in groups</i>";
+                // Regular start message - only in private chats
+                if (isPrivateChat) {
+                    String startMessage = 
+                        "🤖 <b>REPEAT MESSAGES BOT</b>\n\n" +
+                        "📌 <b>YOU CAN REPEAT MULTIPLE MESSAGES</b> 📌\n\n" +
+                        "🔧 <b>ADVANCED FEATURES:</b>\n" +
+                        "• 📸 Image Albums (combined)\n" +
+                        "• 🎬 Video Albums (combined)\n" +
+                        "• With/Without Captions\n\n" +
+                        "🛠 <b>Commands:</b>\n\n" +
+                        "🔹 /repeat2min - Repeat every 2 minutes\n" +
+                        "🔹 /repeat5min - Repeat every 5 minutes\n" +
+                        "🔹 /repeat20min - Repeat every 20 minutes\n" +
+                        "🔹 /repeat60min - Repeat every hour\n" +
+                        "🔹 /repeat120min - Repeat every 2 hours\n" +
+                        "🔹 /repeat24hour - Repeat every 24 hours\n" +
+                        "🔹 /stop - Stop all repeating messages\n\n" +
+                        "⚠️ <i>Only admins can use repeat commands in groups</i>";
+                    
+                    sendMessage(chatId, startMessage, "HTML", null, null);
+                }
+                // If /start is used in group without verify parameter, ignore it
                 
-                sendMessage(chatId, startMessage, "HTML", null, null);
                 return "OK";
             }
             
-            // Verify command (private chat only)
+            // Verify command (private chat only) - Legacy command
             if (text.equals("/verify") && !String.valueOf(chatId).startsWith("-")) {
-                doVerification(userId, chatId);
+                sendMessage(chatId, "Please use the inline button in the group to verify yourself.", null, null, null);
                 return "OK";
             }
             
@@ -1170,24 +1185,6 @@ public class Bot {
         }
     }
 
-    private static boolean doVerification(long userId, long chatId) {
-        if (!pendingVerifications.containsKey(userId)) {
-            sendMessage(chatId, "No pending verification found", null, null, null);
-            return false;
-        }
-        
-        long groupId = pendingVerifications.get(userId);
-        String groupTitle = getChatTitle(groupId);
-        
-        // Format: ✅ Verified 'Group Title' \n <i>Granted full access</i>
-        String message = "✅ Verified '" + groupTitle + "' \n" +
-                        "<i>Granted full access</i>";
-        
-        sendMessage(chatId, message, "HTML", null, null);
-        pendingVerifications.remove(userId);
-        return true;
-    }
-
     private static String getChatTitle(long chatId) {
         try {
             Request request = new Request.Builder()
@@ -1209,7 +1206,7 @@ public class Bot {
         } catch (IOException e) {
             System.err.println("Error getting chat title: " + e.getMessage());
         }
-        return "Unknown";
+        return "Unknown Group";
     }
 
     private static void flushUserBatch() {
