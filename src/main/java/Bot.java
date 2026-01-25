@@ -810,7 +810,10 @@ public class Bot {
                         Thread.sleep(3000);
                     }
                     
-                } else if (isTextOnly && mediaMessage.has("text")) {
+                } else if (isTextOnly && !mediaMessages.isEmpty()) {
+                    // Get the first message for text-only case
+                    JsonObject mediaMessage = mediaMessages.get(0);
+                    
                     // It's a text message - send with inline button attached
                     String text = mediaMessage.get("text").getAsString();
                     String parseMode = null;
