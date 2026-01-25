@@ -516,9 +516,15 @@ public class Bot {
                 }
             }
             
-            // Start command
+            // Start command - Only works in private chat
             if (text.equals("/start")) {
-                // Check for deep link verification
+                // Check if it's a private chat (chat ID positive, not a group/channel)
+                if (String.valueOf(chatId).startsWith("-")) {
+                    // This is a group/channel, ignore /start command
+                    return "OK";
+                }
+                
+                // Check for deep link verification (from inline button)
                 Pattern pattern = Pattern.compile("^/start\\s+verify_(-?\\d+)$");
                 Matcher matcher = pattern.matcher(text);
                 if (matcher.find()) {
@@ -528,7 +534,7 @@ public class Bot {
                     return "OK";
                 }
                 
-                // Regular start message
+                // Regular start message for private chat
                 String startMessage = 
                     "🤖 <b>REPEAT MESSAGES BOT</b>\n\n" +
                     "📌 <b>YOU CAN REPEAT MULTIPLE MESSAGES</b> 📌\n\n" +
@@ -1173,11 +1179,11 @@ public class Bot {
         long groupId = pendingVerifications.get(userId);
         String groupTitle = getChatTitle(groupId);
         
-        String message = "✅ Verification Successful!\n" +
-                        "You have been verified by: " + groupTitle + "\n" +
-                        "Full access granted!";
+        // Format: ✅ Verified 'Group Title' \n <i>Granted full access</i>
+        String message = "✅ Verified '" + groupTitle + "' \n" +
+                        "<i>Granted full access</i>";
         
-        sendMessage(chatId, message, null, null, null);
+        sendMessage(chatId, message, "HTML", null, null);
         pendingVerifications.remove(userId);
         return true;
     }
