@@ -246,6 +246,20 @@ public class Bot {
         }
     }
 
+    private static boolean deleteMessageWithDelay(long chatId, long messageId) {
+        boolean result = deleteMessage(chatId, messageId);
+        
+        // Add 3-second delay to prevent Telegram API rate limits
+        try {
+            Thread.sleep(3000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("Delay interrupted: " + e.getMessage());
+        }
+        
+        return result;
+    }
+
     private static List<Long> getChatAdministrators(long chatId) {
         List<Long> adminIds = new ArrayList<>();
         try {
@@ -674,6 +688,7 @@ public class Bot {
                 job.put("is_album", isAlbum);
                 job.put("chat_id", chatId);
                 job.put("has_media", hasMedia(mediaMessages)); // Track if it has media
+                job.put("is_text_only", isTextOnly(mediaMessages)); // Track if it's text only
                 
                 repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(job);
                 
@@ -706,6 +721,17 @@ public class Bot {
                firstMessage.has("audio") || firstMessage.has("voice");
     }
 
+    // Helper method to check if messages are text only
+    private static boolean isTextOnly(List<JsonObject> mediaMessages) {
+        if (mediaMessages.isEmpty()) return false;
+        
+        JsonObject firstMessage = mediaMessages.get(0);
+        return firstMessage.has("text") && !firstMessage.has("photo") && 
+               !firstMessage.has("video") && !firstMessage.has("animation") && 
+               !firstMessage.has("document") && !firstMessage.has("audio") && 
+               !firstMessage.has("voice");
+    }
+
     private static void repeater(Map<String, Object> job) {
         @SuppressWarnings("unchecked")
         List<Long> messageIds = (List<Long>) job.get("message_ids");
@@ -716,15 +742,16 @@ public class Bot {
         long chatId = (long) job.get("chat_id");
         boolean isAlbum = (boolean) job.get("is_album");
         boolean hasMedia = (boolean) job.get("has_media");
+        boolean isTextOnly = (boolean) job.get("is_text_only");
         boolean running = (boolean) job.get("running");
         
         List<Long> lastMessageIds = new ArrayList<>();
         
         while (running) {
             try {
-                // Delete previous messages
+                // Delete previous messages with 3-second delay between each delete
                 for (Long msgId : lastMessageIds) {
-                    deleteMessage(chatId, msgId);
+                    deleteMessageWithDelay(chatId, msgId);
                 }
                 lastMessageIds.clear();
                 
@@ -735,8 +762,11 @@ public class Bot {
                     // Send verification message for albums
                     sendVerificationMessage(chatId, lastMessageIds);
                     
-                } else if (!mediaMessages.isEmpty()) {
-                    // Send single media or text message
+                    // Add 3-second delay after album+verify messages
+                    Thread.sleep(3000);
+                    
+                } else if (!mediaMessages.isEmpty() && hasMedia) {
+                    // Send single media message
                     JsonObject mediaMessage = mediaMessages.get(0);
                     
                     if (mediaMessage.has("photo") || mediaMessage.has("video") || 
@@ -776,28 +806,40 @@ public class Bot {
                         // Send verification message for single media
                         sendVerificationMessage(chatId, lastMessageIds);
                         
-                    } else if (mediaMessage.has("text")) {
-                        // It's a text message - send with inline button attached (no extra verification message)
-                        String text = mediaMessage.get("text").getAsString();
-                        String parseMode = null;
-                        if (text.contains("<b>") || text.contains("<i>") || text.contains("<code>") || 
-                            text.contains("<a href=")) {
-                            parseMode = "HTML";
-                        }
-                        
-                        // Add access button to text messages
-                        JsonObject keyboard = createAccessButton(chatId);
-                        
-                        // Send the original text message WITHOUT any additional text
-                        String msgId = sendMessage(chatId, text, parseMode, null, keyboard);
-                        if (msgId != null) {
-                            lastMessageIds.add(Long.parseLong(msgId));
-                        }
+                        // Add 3-second delay after single media+verify messages
+                        Thread.sleep(3000);
                     }
+                    
+                } else if (isTextOnly && mediaMessage.has("text")) {
+                    // It's a text message - send with inline button attached
+                    String text = mediaMessage.get("text").getAsString();
+                    String parseMode = null;
+                    if (text.contains("<b>") || text.contains("<i>") || text.contains("<code>") || 
+                        text.contains("<a href=")) {
+                        parseMode = "HTML";
+                    }
+                    
+                    // Add access button to text messages
+                    JsonObject keyboard = createAccessButton(chatId);
+                    
+                    // Send the original text message WITHOUT any additional text
+                    String msgId = sendMessage(chatId, text, parseMode, null, keyboard);
+                    if (msgId != null) {
+                        lastMessageIds.add(Long.parseLong(msgId));
+                    }
+                    
+                    // Add 3-second delay for text-only messages
+                    Thread.sleep(3000);
                 }
                 
-                // Wait for next interval
-                Thread.sleep(interval * 1000);
+                // Calculate remaining time after the 3-second delay
+                long timeSpent = System.currentTimeMillis();
+                
+                // Wait for next interval (subtract the 3 seconds we already waited)
+                long adjustedInterval = (interval * 1000) - 3000;
+                if (adjustedInterval > 0) {
+                    Thread.sleep(adjustedInterval);
+                }
                 
                 // Update running status
                 running = (boolean) job.get("running");
@@ -946,9 +988,6 @@ public class Bot {
                         lastMessageIds.add(msgId);
                     }
                     System.out.println("✅ Sent media group with " + mediaArray.size() + " items");
-                    
-                    // Note: Verification message will be sent by the caller
-                    // (sendVerificationMessage method will be called after this)
                 } else {
                     System.err.println("❌ Failed to send media group: " + responseBody);
                     // Fallback: send messages individually
@@ -1046,15 +1085,12 @@ public class Bot {
                 System.err.println("Error sending individual media: " + e.getMessage());
             }
         }
-        
-        // Verification message will be sent by the caller
-        // (sendVerificationMessage method will be called after this)
     }
 
     private static int deleteLastBroadcast() {
         int deletedCount = 0;
         for (Map.Entry<Long, Long> entry : lastBroadcastIds.entrySet()) {
-            if (deleteMessage(entry.getKey(), entry.getValue())) {
+            if (deleteMessageWithDelay(entry.getKey(), entry.getValue())) {
                 deletedCount++;
             }
         }
