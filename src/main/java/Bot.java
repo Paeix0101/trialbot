@@ -465,7 +465,7 @@ public class Bot {
             
             // ========== COMMAND HANDLING ==========
             
-            // Owner commands
+            // Owner commands (works in any chat type)
             if (chatId == OWNER_ID) {
                 // Check bot status
                 if (text.startsWith("-")) {
@@ -518,9 +518,6 @@ public class Bot {
             
             // Start command - Handle both private chat and inline button verification
             if (text.startsWith("/start")) {
-                // Check if it's a group/channel (chat ID negative)
-                boolean isPrivateChat = !String.valueOf(chatId).startsWith("-");
-                
                 // Check for deep link verification (from inline button)
                 // Format: /start verify_<groupId>
                 if (text.contains("verify_")) {
@@ -545,7 +542,8 @@ public class Bot {
                     }
                 }
                 
-                // Regular start message - only in private chats
+                // Regular start message - only in private chats (not groups/channels)
+                boolean isPrivateChat = !String.valueOf(chatId).startsWith("-");
                 if (isPrivateChat) {
                     String startMessage = 
                         "🤖 <b>REPEAT MESSAGES BOT</b>\n\n" +
@@ -577,151 +575,173 @@ public class Bot {
                 return "OK";
             }
             
-            // Check if user is admin in group
-            boolean isAdmin = false;
-            if (String.valueOf(chatId).startsWith("-")) {
-                List<Long> admins = getChatAdministrators(chatId);
-                isAdmin = admins.contains(userId);
-            }
+            // ========== CHANNEL/GROUP COMMANDS ==========
             
-            // Stop command
-            if (text.equals("/stop")) {
-                if (String.valueOf(chatId).startsWith("-") && !isAdmin) {
-                    sendMessage(chatId, "❌ Only admins can use this command", null, messageId, null);
-                    return "OK";
-                }
-                
-                if (repeatJobs.containsKey(chatId) && !repeatJobs.get(chatId).isEmpty()) {
-                    for (Map<String, Object> job : repeatJobs.get(chatId)) {
-                        job.put("running", false);
-                    }
-                    repeatJobs.remove(chatId);
-                    sendMessage(chatId, "✅ All repeating tasks stopped", null, messageId, null);
-                } else {
-                    sendMessage(chatId, "No active repeating tasks found", null, messageId, null);
-                }
-                return "OK";
-            }
+            // Check if it's a channel or group (negative chat ID)
+            boolean isChannelOrGroup = String.valueOf(chatId).startsWith("-");
             
-            // Repeat commands (must reply to a message)
-            if (text.matches("^/(repeat2min|repeat5min|repeat20min|repeat60min|repeat120min|repeat24hour)$") && 
-                message.has("reply_to_message")) {
+            if (isChannelOrGroup) {
+                // For channels/groups, check if sender is admin or anonymous admin
+                boolean isAdmin = false;
+                boolean isAnonymousAdmin = false;
                 
-                if (String.valueOf(chatId).startsWith("-") && !isAdmin) {
-                    sendMessage(chatId, "❌ Only admins can use repeat commands", null, messageId, null);
-                    return "OK";
-                }
-                
-                JsonObject repliedMessage = message.getAsJsonObject("reply_to_message");
-                long repliedMessageId = repliedMessage.get("message_id").getAsLong();
-                
-                // Parse interval
-                long intervalSeconds = 0;
-                String displayInterval = "";
-                
-                switch (text) {
-                    case "/repeat2min":
-                        intervalSeconds = 120;
-                        displayInterval = "2 minutes";
-                        break;
-                    case "/repeat5min":
-                        intervalSeconds = 300;
-                        displayInterval = "5 minutes";
-                        break;
-                    case "/repeat20min":
-                        intervalSeconds = 1200;
-                        displayInterval = "20 minutes";
-                        break;
-                    case "/repeat60min":
-                        intervalSeconds = 3600;
-                        displayInterval = "1 hour";
-                        break;
-                    case "/repeat120min":
-                        intervalSeconds = 7200;
-                        displayInterval = "2 hours";
-                        break;
-                    case "/repeat24hour":
-                        intervalSeconds = 86400;
-                        displayInterval = "24 hours";
-                        break;
-                }
-                
-                // Check if it's part of an album
-                List<Long> messageIds = new ArrayList<>();
-                List<JsonObject> mediaMessages = new ArrayList<>();
-                boolean isAlbum = false;
-                String caption = null;
-                
-                if (repliedMessage.has("media_group_id")) {
-                    String mediaGroupId = repliedMessage.get("media_group_id").getAsString();
-                    String key = chatId + "_" + mediaGroupId;
+                // Check if sender is anonymous admin (no 'from' field in channel posts)
+                if (chatType.equals("channel") && !message.has("from")) {
+                    // In channels, posts can be sent by anonymous admins
+                    // For channels, we need to check if the bot is admin and accept commands from any sender
+                    List<Long> admins = getChatAdministrators(chatId);
+                    long botId = getMe().getAsJsonObject("result").get("id").getAsLong();
                     
-                    // Wait a bit for all album messages to arrive (up to 5 seconds)
-                    int waitCount = 0;
-                    while (waitCount < 10 && (!mediaGroups.containsKey(key) || 
-                           ((List<JsonObject>) mediaGroups.get(key).get("media_messages")).size() < 2)) {
-                        try {
-                            Thread.sleep(500);
-                            waitCount++;
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
+                    if (admins.contains(botId)) {
+                        // Bot is admin in this channel, accept commands
+                        isAdmin = true;
+                        isAnonymousAdmin = true;
+                        System.out.println("Channel command accepted (bot is admin, anonymous admin detected)");
+                    }
+                } else if (message.has("from")) {
+                    // Regular group or channel with visible sender
+                    List<Long> admins = getChatAdministrators(chatId);
+                    isAdmin = admins.contains(userId);
+                }
+                
+                // Stop command
+                if (text.equals("/stop")) {
+                    if (isAdmin || isAnonymousAdmin) {
+                        if (repeatJobs.containsKey(chatId) && !repeatJobs.get(chatId).isEmpty()) {
+                            for (Map<String, Object> job : repeatJobs.get(chatId)) {
+                                job.put("running", false);
+                            }
+                            repeatJobs.remove(chatId);
+                            sendMessage(chatId, "✅ All repeating tasks stopped", null, messageId, null);
+                        } else {
+                            sendMessage(chatId, "No active repeating tasks found", null, messageId, null);
                         }
+                    } else {
+                        sendMessage(chatId, "❌ Only admins can use this command", null, messageId, null);
+                    }
+                    return "OK";
+                }
+                
+                // Repeat commands (must reply to a message)
+                if (text.matches("^/(repeat2min|repeat5min|repeat20min|repeat60min|repeat120min|repeat24hour)$") && 
+                    message.has("reply_to_message")) {
+                    
+                    if (!isAdmin && !isAnonymousAdmin) {
+                        sendMessage(chatId, "❌ Only admins can use repeat commands", null, messageId, null);
+                        return "OK";
                     }
                     
-                    if (mediaGroups.containsKey(key)) {
-                        @SuppressWarnings("unchecked")
-                        List<JsonObject> albumMessages = (List<JsonObject>) mediaGroups.get(key).get("media_messages");
-                        @SuppressWarnings("unchecked")
-                        List<Long> albumMessageIds = (List<Long>) mediaGroups.get(key).get("message_ids");
+                    JsonObject repliedMessage = message.getAsJsonObject("reply_to_message");
+                    long repliedMessageId = repliedMessage.get("message_id").getAsLong();
+                    
+                    // Parse interval
+                    long intervalSeconds = 0;
+                    String displayInterval = "";
+                    
+                    switch (text) {
+                        case "/repeat2min":
+                            intervalSeconds = 120;
+                            displayInterval = "2 minutes";
+                            break;
+                        case "/repeat5min":
+                            intervalSeconds = 300;
+                            displayInterval = "5 minutes";
+                            break;
+                        case "/repeat20min":
+                            intervalSeconds = 1200;
+                            displayInterval = "20 minutes";
+                            break;
+                        case "/repeat60min":
+                            intervalSeconds = 3600;
+                            displayInterval = "1 hour";
+                            break;
+                        case "/repeat120min":
+                            intervalSeconds = 7200;
+                            displayInterval = "2 hours";
+                            break;
+                        case "/repeat24hour":
+                            intervalSeconds = 86400;
+                            displayInterval = "24 hours";
+                            break;
+                    }
+                    
+                    // Check if it's part of an album
+                    List<Long> messageIds = new ArrayList<>();
+                    List<JsonObject> mediaMessages = new ArrayList<>();
+                    boolean isAlbum = false;
+                    String caption = null;
+                    
+                    if (repliedMessage.has("media_group_id")) {
+                        String mediaGroupId = repliedMessage.get("media_group_id").getAsString();
+                        String key = chatId + "_" + mediaGroupId;
                         
-                        mediaMessages.addAll(albumMessages);
-                        messageIds.addAll(albumMessageIds);
-                        isAlbum = albumMessages.size() > 1;
-                        
-                        // Get caption from first message if available
-                        if (!albumMessages.isEmpty()) {
-                            JsonObject firstMsg = albumMessages.get(0);
-                            if (firstMsg.has("caption")) {
-                                caption = firstMsg.get("caption").getAsString();
+                        // Wait a bit for all album messages to arrive (up to 5 seconds)
+                        int waitCount = 0;
+                        while (waitCount < 10 && (!mediaGroups.containsKey(key) || 
+                               ((List<JsonObject>) mediaGroups.get(key).get("media_messages")).size() < 2)) {
+                            try {
+                                Thread.sleep(500);
+                                waitCount++;
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
                             }
                         }
                         
-                        System.out.println("Album detected: " + mediaMessages.size() + " media items");
+                        if (mediaGroups.containsKey(key)) {
+                            @SuppressWarnings("unchecked")
+                            List<JsonObject> albumMessages = (List<JsonObject>) mediaGroups.get(key).get("media_messages");
+                            @SuppressWarnings("unchecked")
+                            List<Long> albumMessageIds = (List<Long>) mediaGroups.get(key).get("message_ids");
+                            
+                            mediaMessages.addAll(albumMessages);
+                            messageIds.addAll(albumMessageIds);
+                            isAlbum = albumMessages.size() > 1;
+                            
+                            // Get caption from first message if available
+                            if (!albumMessages.isEmpty()) {
+                                JsonObject firstMsg = albumMessages.get(0);
+                                if (firstMsg.has("caption")) {
+                                    caption = firstMsg.get("caption").getAsString();
+                                }
+                            }
+                            
+                            System.out.println("Album detected: " + mediaMessages.size() + " media items");
+                        } else {
+                            messageIds.add(repliedMessageId);
+                            mediaMessages.add(repliedMessage);
+                        }
                     } else {
                         messageIds.add(repliedMessageId);
                         mediaMessages.add(repliedMessage);
+                        if (repliedMessage.has("caption")) {
+                            caption = repliedMessage.get("caption").getAsString();
+                        }
                     }
-                } else {
-                    messageIds.add(repliedMessageId);
-                    mediaMessages.add(repliedMessage);
-                    if (repliedMessage.has("caption")) {
-                        caption = repliedMessage.get("caption").getAsString();
-                    }
+                    
+                    // Create job
+                    Map<String, Object> job = new HashMap<>();
+                    job.put("message_ids", messageIds);
+                    job.put("media_messages", mediaMessages);
+                    job.put("caption", caption);
+                    job.put("interval", intervalSeconds);
+                    job.put("running", true);
+                    job.put("is_album", isAlbum);
+                    job.put("chat_id", chatId);
+                    job.put("has_media", hasMedia(mediaMessages)); // Track if it has media
+                    job.put("is_text_only", isTextOnly(mediaMessages)); // Track if it's text only
+                    
+                    repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(job);
+                    
+                    // Start repeating thread
+                    new Thread(() -> repeater(job)).start();
+                    
+                    String response = isAlbum ? 
+                        "✅ Album (" + mediaMessages.size() + " items) will repeat every " + displayInterval :
+                        "✅ Message will repeat every " + displayInterval;
+                    
+                    sendMessage(chatId, response, null, messageId, null);
+                    return "OK";
                 }
-                
-                // Create job
-                Map<String, Object> job = new HashMap<>();
-                job.put("message_ids", messageIds);
-                job.put("media_messages", mediaMessages);
-                job.put("caption", caption);
-                job.put("interval", intervalSeconds);
-                job.put("running", true);
-                job.put("is_album", isAlbum);
-                job.put("chat_id", chatId);
-                job.put("has_media", hasMedia(mediaMessages)); // Track if it has media
-                job.put("is_text_only", isTextOnly(mediaMessages)); // Track if it's text only
-                
-                repeatJobs.computeIfAbsent(chatId, k -> new ArrayList<>()).add(job);
-                
-                // Start repeating thread
-                new Thread(() -> repeater(job)).start();
-                
-                String response = isAlbum ? 
-                    "✅ Album (" + mediaMessages.size() + " items) will repeat every " + displayInterval :
-                    "✅ Message will repeat every " + displayInterval;
-                
-                sendMessage(chatId, response, null, messageId, null);
-                return "OK";
             }
             
         } catch (Exception e) {
