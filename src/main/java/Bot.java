@@ -581,27 +581,57 @@ public class Bot {
             boolean isChannelOrGroup = String.valueOf(chatId).startsWith("-");
             
             if (isChannelOrGroup) {
-                // For channels/groups, check if sender is admin or anonymous admin
+                // For channels/groups, handle anonymous admins properly
                 boolean isAdmin = false;
                 boolean isAnonymousAdmin = false;
                 
-                // Check if sender is anonymous admin (no 'from' field in channel posts)
-                if (chatType.equals("channel") && !message.has("from")) {
-                    // In channels, posts can be sent by anonymous admins
-                    // For channels, we need to check if the bot is admin and accept commands from any sender
+                // Check if sender is anonymous (no 'from' field)
+                // This happens in channels AND groups with anonymous admins
+                if (!message.has("from")) {
+                    // Message has no 'from' field - could be:
+                    // 1. Channel post (channel message)
+                    // 2. Group message from anonymous admin
+                    
+                    // First, check if bot is admin in this chat
                     List<Long> admins = getChatAdministrators(chatId);
                     long botId = getMe().getAsJsonObject("result").get("id").getAsLong();
                     
                     if (admins.contains(botId)) {
-                        // Bot is admin in this channel, accept commands
-                        isAdmin = true;
-                        isAnonymousAdmin = true;
-                        System.out.println("Channel command accepted (bot is admin, anonymous admin detected)");
+                        // Bot is admin in this chat
+                        // For anonymous messages, we need a different approach
+                        
+                        // STRATEGY 1: Check if message has "sender_chat" (for channels)
+                        if (message.has("sender_chat")) {
+                            JsonObject senderChat = message.getAsJsonObject("sender_chat");
+                            long senderChatId = senderChat.get("id").getAsLong();
+                            
+                            // If sender_chat ID matches the chat ID, it's from the channel itself
+                            if (senderChatId == chatId) {
+                                isAdmin = true;
+                                isAnonymousAdmin = true;
+                                System.out.println("Channel anonymous admin command accepted (bot is admin)");
+                            }
+                        }
+                        // STRATEGY 2: For groups with anonymous admins
+                        else if (chatType.equals("group") || chatType.equals("supergroup")) {
+                            // In groups, anonymous admins can post messages
+                            // We'll accept commands if bot is admin and message has no 'from' field
+                            isAdmin = true;
+                            isAnonymousAdmin = true;
+                            System.out.println("Group anonymous admin command accepted (bot is admin)");
+                        }
                     }
-                } else if (message.has("from")) {
-                    // Regular group or channel with visible sender
+                } 
+                // Regular message with 'from' field
+                else if (message.has("from")) {
+                    // Get the sender's user ID
+                    userId = message.getAsJsonObject("from").get("id").getAsLong();
+                    
+                    // Check if sender is admin
                     List<Long> admins = getChatAdministrators(chatId);
                     isAdmin = admins.contains(userId);
+                    
+                    System.out.println("Regular admin check: user " + userId + " is admin: " + isAdmin);
                 }
                 
                 // Stop command
