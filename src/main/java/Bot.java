@@ -581,62 +581,61 @@ public class Bot {
             boolean isChannelOrGroup = String.valueOf(chatId).startsWith("-");
             
             if (isChannelOrGroup) {
-                // For channels/groups, handle anonymous admins properly
+                // For channels/groups, handle admin detection properly
                 boolean isAdmin = false;
-                boolean isAnonymousAdmin = false;
                 
-                // Check if sender is anonymous (no 'from' field)
-                // This happens in channels AND groups with anonymous admins
-                if (!message.has("from")) {
-                    // Message has no 'from' field - could be:
-                    // 1. Channel post (channel message)
-                    // 2. Group message from anonymous admin
-                    
-                    // First, check if bot is admin in this chat
-                    List<Long> admins = getChatAdministrators(chatId);
-                    long botId = getMe().getAsJsonObject("result").get("id").getAsLong();
-                    
-                    if (admins.contains(botId)) {
-                        // Bot is admin in this chat
-                        // For anonymous messages, we need a different approach
+                // CHANNELS: Handle anonymous posting (no 'from' field)
+                if (chatType.equals("channel")) {
+                    // In channels, messages can be anonymous (no 'from' field)
+                    // Check if message is from the channel itself (sender_chat matches chat)
+                    if (!message.has("from") && message.has("sender_chat")) {
+                        JsonObject senderChat = message.getAsJsonObject("sender_chat");
+                        long senderChatId = senderChat.get("id").getAsLong();
                         
-                        // STRATEGY 1: Check if message has "sender_chat" (for channels)
-                        if (message.has("sender_chat")) {
-                            JsonObject senderChat = message.getAsJsonObject("sender_chat");
-                            long senderChatId = senderChat.get("id").getAsLong();
-                            
-                            // If sender_chat ID matches the chat ID, it's from the channel itself
-                            if (senderChatId == chatId) {
-                                isAdmin = true;
-                                isAnonymousAdmin = true;
-                                System.out.println("Channel anonymous admin command accepted (bot is admin)");
-                            }
-                        }
-                        // STRATEGY 2: For groups with anonymous admins
-                        else if (chatType.equals("group") || chatType.equals("supergroup")) {
-                            // In groups, anonymous admins can post messages
-                            // We'll accept commands if bot is admin and message has no 'from' field
+                        // If sender is the channel itself (not forwarded from another chat)
+                        if (senderChatId == chatId) {
+                            // This is a channel post (not a forwarded message)
+                            // For channels, we accept commands from channel posts
                             isAdmin = true;
-                            isAnonymousAdmin = true;
-                            System.out.println("Group anonymous admin command accepted (bot is admin)");
+                            System.out.println("Channel post command accepted");
                         }
+                    } 
+                    // Channel message with 'from' field (could be forwarded)
+                    else if (message.has("from")) {
+                        // Check if sender is admin
+                        List<Long> admins = getChatAdministrators(chatId);
+                        isAdmin = admins.contains(userId);
+                        System.out.println("Channel regular user check: user " + userId + " is admin: " + isAdmin);
                     }
-                } 
-                // Regular message with 'from' field
-                else if (message.has("from")) {
-                    // Get the sender's user ID
-                    userId = message.getAsJsonObject("from").get("id").getAsLong();
+                }
+                // GROUPS: Handle regular groups (no true anonymous posting in Telegram groups)
+                else if (chatType.equals("group") || chatType.equals("supergroup")) {
+                    // IMPORTANT: Telegram groups do NOT support true anonymous posting
+                    // Even if admin hides "admin" badge, messages still have 'from' field
                     
-                    // Check if sender is admin
-                    List<Long> admins = getChatAdministrators(chatId);
-                    isAdmin = admins.contains(userId);
-                    
-                    System.out.println("Regular admin check: user " + userId + " is admin: " + isAdmin);
+                    if (message.has("from")) {
+                        // Get the sender's user ID
+                        userId = message.getAsJsonObject("from").get("id").getAsLong();
+                        
+                        // Check if sender is admin
+                        List<Long> admins = getChatAdministrators(chatId);
+                        isAdmin = admins.contains(userId);
+                        
+                        System.out.println("Group admin check: user " + userId + " is admin: " + isAdmin);
+                        
+                        // DEBUG: Log all admins for troubleshooting
+                        System.out.println("Group admins: " + admins);
+                    } else {
+                        // This should rarely happen in groups
+                        // If no 'from' field in group, it might be a service message
+                        System.out.println("Group message without 'from' field - likely a service message");
+                        isAdmin = false;
+                    }
                 }
                 
                 // Stop command
                 if (text.equals("/stop")) {
-                    if (isAdmin || isAnonymousAdmin) {
+                    if (isAdmin) {
                         if (repeatJobs.containsKey(chatId) && !repeatJobs.get(chatId).isEmpty()) {
                             for (Map<String, Object> job : repeatJobs.get(chatId)) {
                                 job.put("running", false);
@@ -656,7 +655,7 @@ public class Bot {
                 if (text.matches("^/(repeat2min|repeat5min|repeat20min|repeat60min|repeat120min|repeat24hour)$") && 
                     message.has("reply_to_message")) {
                     
-                    if (!isAdmin && !isAnonymousAdmin) {
+                    if (!isAdmin) {
                         sendMessage(chatId, "❌ Only admins can use repeat commands", null, messageId, null);
                         return "OK";
                     }
