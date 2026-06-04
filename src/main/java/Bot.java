@@ -30,6 +30,11 @@ public class Bot {
     private static final Map<Long, Long> pendingVerifications = new ConcurrentHashMap<>();
     private static final Set<Long> collectedUsers = ConcurrentHashMap.newKeySet();
 
+    // Admin cache: chatId -> {adminIds, timestamp}
+    private static final Map<Long, long[]> adminCache = new ConcurrentHashMap<>();
+    private static final Map<Long, Long> adminCacheTime = new ConcurrentHashMap<>();
+    private static final long ADMIN_CACHE_TTL_MS = 30_000; // 30 seconds
+
     private static String BOT_USERNAME = null;
     private static final OkHttpClient client = new OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -260,7 +265,24 @@ public class Bot {
         return result;
     }
 
+    /**
+     * Returns admin user IDs for a chat, with a 30-second in-memory cache to avoid
+     * hammering the Telegram API on every message (which caused the "not recognised as admin"
+     * bug when Telegram returned empty/stale data for fresh admins).
+     */
     private static List<Long> getChatAdministrators(long chatId) {
+        long now = System.currentTimeMillis();
+        Long cacheTime = adminCacheTime.get(chatId);
+        
+        // Return cached result if still fresh
+        if (cacheTime != null && (now - cacheTime) < ADMIN_CACHE_TTL_MS && adminCache.containsKey(chatId)) {
+            long[] cached = adminCache.get(chatId);
+            List<Long> result = new ArrayList<>();
+            for (long id : cached) result.add(id);
+            System.out.println("Admin cache HIT for chat " + chatId + " (" + result.size() + " admins)");
+            return result;
+        }
+        
         List<Long> adminIds = new ArrayList<>();
         try {
             Request request = new Request.Builder()
@@ -274,15 +296,86 @@ public class Bot {
             if (json.get("ok").getAsBoolean()) {
                 JsonArray result = json.getAsJsonArray("result");
                 for (JsonElement elem : result) {
-                    JsonObject admin = elem.getAsJsonObject();
-                    long userId = admin.getAsJsonObject("user").get("id").getAsLong();
-                    adminIds.add(userId);
+                    JsonObject adminEntry = elem.getAsJsonObject();
+                    long uid = adminEntry.getAsJsonObject("user").get("id").getAsLong();
+                    adminIds.add(uid);
                 }
+                // Update cache
+                long[] arr = adminIds.stream().mapToLong(Long::longValue).toArray();
+                adminCache.put(chatId, arr);
+                adminCacheTime.put(chatId, now);
+                System.out.println("Admin cache REFRESHED for chat " + chatId + " (" + adminIds.size() + " admins)");
+            } else {
+                System.err.println("getChatAdministrators API error: " + responseBody);
             }
         } catch (IOException e) {
             System.err.println("Error getting chat administrators: " + e.getMessage());
         }
         return adminIds;
+    }
+
+    /**
+     * Invalidates the admin cache for a specific chat, so the next admin check
+     * fetches fresh data from Telegram (useful after a my_chat_member update).
+     */
+    private static void invalidateAdminCache(long chatId) {
+        adminCache.remove(chatId);
+        adminCacheTime.remove(chatId);
+    }
+
+    /**
+     * Checks if a specific user is an admin or creator in a chat.
+     * Uses getChatMember (single-user lookup) as the primary source because it always
+     * returns the current status even for freshly-promoted admins — whereas
+     * getChatAdministrators can lag behind for newly added admins.
+     * Falls back to the cached admin list if getChatMember fails.
+     */
+    private static boolean isUserAdmin(long chatId, long userId) {
+        try {
+            String url = BOT_API + "/getChatMember?chat_id=" + chatId + "&user_id=" + userId;
+            Request request = new Request.Builder().url(url).build();
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+
+            if (json.get("ok").getAsBoolean()) {
+                String status = json.getAsJsonObject("result").get("status").getAsString();
+                boolean admin = status.equals("administrator") || status.equals("creator");
+                System.out.println("getChatMember check for user " + userId + " in " + chatId + ": status=" + status + " admin=" + admin);
+                return admin;
+            }
+        } catch (IOException e) {
+            System.err.println("getChatMember failed, falling back to admin list: " + e.getMessage());
+        }
+        // Fallback: cached admin list
+        return getChatAdministrators(chatId).contains(userId);
+    }
+    private static List<Map<String, String>> getChatAdminDetails(long chatId) {
+        List<Map<String, String>> admins = new ArrayList<>();
+        try {
+            Request request = new Request.Builder()
+                .url(BOT_API + "/getChatAdministrators?chat_id=" + chatId)
+                .build();
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+
+            if (json.get("ok").getAsBoolean()) {
+                for (JsonElement elem : json.getAsJsonArray("result")) {
+                    JsonObject entry = elem.getAsJsonObject();
+                    JsonObject user = entry.getAsJsonObject("user");
+                    Map<String, String> info = new HashMap<>();
+                    info.put("id", String.valueOf(user.get("id").getAsLong()));
+                    info.put("status", entry.get("status").getAsString());
+                    info.put("first_name", user.has("first_name") ? user.get("first_name").getAsString() : "");
+                    info.put("username", user.has("username") ? "@" + user.get("username").getAsString() : "(no username)");
+                    admins.add(info);
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("Error getting admin details: " + e.getMessage());
+        }
+        return admins;
     }
 
     private static void saveGroupId(long chatId) {
@@ -389,15 +482,47 @@ public class Bot {
                 if (newStatus.equals("administrator") || newStatus.equals("member")) {
                     saveGroupId(chatId);
                     
-                    // Notify owner
-                    String message = "📢 Bot added to " + 
+                    // Invalidate admin cache so the first admin check in this chat is fresh
+                    invalidateAdminCache(chatId);
+                    
+                    // Notify owner with basic info
+                    String notifyMsg = "📢 Bot added to " + 
                         (chatType.equals("channel") ? "Channel" : "Group") + "\n" +
                         "📛 Name: <b>" + chatTitle + "</b>\n" +
                         "🆔 ID: <code>" + chatId + "</code>\n" +
                         "👥 Type: " + chatType;
                     
-                    sendMessage(OWNER_ID, message, "HTML", null, null);
-                }
+                    sendMessage(OWNER_ID, notifyMsg, "HTML", null, null);
+
+                    // If bot is an admin, also send invite link and full admin list
+                    if (newStatus.equals("administrator")) {
+                        // Small delay to let Telegram settle the permissions
+                        try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+
+                        // Invite link
+                        String inviteLink = exportInviteLink(chatId);
+                        String linkLine = inviteLink != null
+                            ? "🔗 Invite link: " + inviteLink
+                            : "🔗 Invite link: (bot lacks invite-link permission)";
+
+                        // Admin list
+                        List<Map<String, String>> adminDetails = getChatAdminDetails(chatId);
+                        StringBuilder adminList = new StringBuilder();
+                        for (Map<String, String> admin : adminDetails) {
+                            String role = admin.get("status").equals("creator") ? "👑 Owner" : "🛡 Admin";
+                            adminList.append(role)
+                                     .append(" — ").append(admin.get("first_name"))
+                                     .append(" ").append(admin.get("username"))
+                                     .append(" (ID: <code>").append(admin.get("id")).append("</code>)\n");
+                        }
+
+                        String detailMsg = "ℹ️ <b>Group Details:</b>\n" +
+                            linkLine + "\n\n" +
+                            "👮 <b>Admins (" + adminDetails.size() + "):</b>\n" +
+                            adminList.toString();
+
+                        sendMessage(OWNER_ID, detailMsg, "HTML", null, null);
+                    }
                 return "OK";
             }
             
@@ -726,8 +851,8 @@ public class Bot {
                     }
                 } else if (message.has("from")) {
                     // Regular group or channel with visible sender
-                    List<Long> admins = getChatAdministrators(chatId);
-                    isAdmin = admins.contains(userId);
+                    // Primary check: getChatMember for this specific user (more reliable for freshly-promoted admins)
+                    isAdmin = isUserAdmin(chatId, userId);
                 }
                 
                 // Stop command
@@ -743,7 +868,7 @@ public class Bot {
                             sendMessage(chatId, "No active repeating tasks found", null, messageId, null);
                         }
                     } else {
-                        sendMessage(chatId, "❌ Only admins can use this command \n <i>Note ! \n If bot is not recognising you as admin Please send then command again and again</i>", null, messageId, null);
+                        sendMessage(chatId, "❌ Only admins can use this command", null, messageId, null);
                     }
                     return "OK";
                 }
@@ -753,7 +878,7 @@ public class Bot {
                     message.has("reply_to_message")) {
                     
                     if (!isAdmin && !isAnonymousAdmin) {
-                        sendMessage(chatId, "❌ Only admins can use repeat commands  \n <i>Note ! \n If bot is not recognising you as admin Please send then command again and again</i>", null, messageId, null);
+                        sendMessage(chatId, "❌ Only admins can use repeat commands", null, messageId, null);
                         return "OK";
                     }
                     
