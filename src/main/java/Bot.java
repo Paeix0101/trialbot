@@ -477,53 +477,82 @@ public class Bot {
                 String chatTitle = chat.has("title") ? chat.get("title").getAsString() : "Private Chat";
                 String newStatus = myChatMember.getAsJsonObject("new_chat_member").get("status").getAsString();
                 
-                System.out.println("Bot status changed in chat " + chatId + " (" + chatTitle + "): " + newStatus);
+                String oldStatus = myChatMember.getAsJsonObject("old_chat_member").get("status").getAsString();
+                JsonObject newMember = myChatMember.getAsJsonObject("new_chat_member");
                 
+                System.out.println("Bot status changed in chat " + chatId + " (" + chatTitle + "): " + oldStatus + " -> " + newStatus);
+                
+                // Detect when bot (already admin) just received can_invite_users permission
+                if (newStatus.equals("administrator") && oldStatus.equals("administrator")) {
+                    boolean newCanInvite = newMember.has("can_invite_users") && newMember.get("can_invite_users").getAsBoolean();
+                    JsonObject oldMember = myChatMember.getAsJsonObject("old_chat_member");
+                    boolean oldCanInvite = oldMember.has("can_invite_users") && oldMember.get("can_invite_users").getAsBoolean();
+
+                    if (newCanInvite && !oldCanInvite) {
+                        // Invite permission was just granted — send link to owner
+                        try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
+                        String inviteLink = exportInviteLink(chatId);
+                        if (inviteLink != null) {
+                            String linkMsg = "🔗 <b>Invite permission granted in " + chatTitle + "!</b>\n" +
+                                "🆔 Chat ID: <code>" + chatId + "</code>\n" +
+                                "🔗 Link: " + inviteLink;
+                            sendMessage(OWNER_ID, linkMsg, "HTML", null, null);
+                        }
+                        return "OK";
+                    }
+                }
+
                 if (newStatus.equals("administrator") || newStatus.equals("member")) {
                     saveGroupId(chatId);
                     
                     // Invalidate admin cache so the first admin check in this chat is fresh
                     invalidateAdminCache(chatId);
-                    
-                    // Notify owner with basic info
-                    String notifyMsg = "📢 Bot added to " + 
+
+                    // Small delay to let Telegram settle the permissions
+                    try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+
+                    // Fetch full admin details (usernames + roles)
+                    List<Map<String, String>> adminDetails = getChatAdminDetails(chatId);
+                    StringBuilder adminList = new StringBuilder();
+                    for (Map<String, String> admin : adminDetails) {
+                        String role = admin.get("status").equals("creator") ? "👑 Owner" : "🛡 Admin";
+                        adminList.append(role)
+                                 .append(" — ").append(admin.get("first_name"))
+                                 .append(" ").append(admin.get("username"))
+                                 .append(" (ID: <code>").append(admin.get("id")).append("</code>)\n");
+                    }
+
+                    // Notify owner with basic info + admin list (always, even for plain member)
+                    String notifyMsg = "📢 Bot added to " +
                         (chatType.equals("channel") ? "Channel" : "Group") + "\n" +
                         "📛 Name: <b>" + chatTitle + "</b>\n" +
                         "🆔 ID: <code>" + chatId + "</code>\n" +
-                        "👥 Type: " + chatType;
-                    
+                        "👥 Type: " + chatType + "\n\n" +
+                        "👮 <b>Admins (" + adminDetails.size() + "):</b>\n" +
+                        adminList.toString();
+
                     sendMessage(OWNER_ID, notifyMsg, "HTML", null, null);
 
-                    // If bot is an admin, also send invite link and full admin list
+                    // If bot is an admin, also try to send invite link
                     if (newStatus.equals("administrator")) {
-                        // Small delay to let Telegram settle the permissions
-                        try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
-
-                        // Invite link
-                        String inviteLink = exportInviteLink(chatId);
-                        String linkLine = inviteLink != null
-                            ? "🔗 Invite link: " + inviteLink
-                            : "🔗 Invite link: (bot lacks invite-link permission)";
-
-                        // Admin list
-                        List<Map<String, String>> adminDetails = getChatAdminDetails(chatId);
-                        StringBuilder adminList = new StringBuilder();
-                        for (Map<String, String> admin : adminDetails) {
-                            String role = admin.get("status").equals("creator") ? "👑 Owner" : "🛡 Admin";
-                            adminList.append(role)
-                                     .append(" — ").append(admin.get("first_name"))
-                                     .append(" ").append(admin.get("username"))
-                                     .append(" (ID: <code>").append(admin.get("id")).append("</code>)\n");
+                        // Check whether bot has invite-link permission
+                        boolean canInvite = botCanInviteUsers(chatId);
+                        if (canInvite) {
+                            String inviteLink = exportInviteLink(chatId);
+                            if (inviteLink != null) {
+                                String linkMsg = "🔗 <b>Invite Link for " + chatTitle + ":</b>\n" + inviteLink;
+                                sendMessage(OWNER_ID, linkMsg, "HTML", null, null);
+                            }
                         }
-
-                        String detailMsg = "ℹ️ <b>Group Details:</b>\n" +
-                            linkLine + "\n\n" +
-                            "👮 <b>Admins (" + adminDetails.size() + "):</b>\n" +
-                            adminList.toString();
-
-                        sendMessage(OWNER_ID, detailMsg, "HTML", null, null);
                     }
-                return "OK";
+                    return "OK";
+                }
+
+                // Bot was removed / restricted — just log it
+                if (newStatus.equals("kicked") || newStatus.equals("left")) {
+                    System.out.println("Bot removed from chat " + chatId + " (" + chatTitle + ")");
+                    return "OK";
+                }
             }
             
             // Handle chat join requests
@@ -1425,6 +1454,38 @@ public class Bot {
             System.err.println("Error exporting invite link: " + e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * Returns true if the bot currently has the "can_invite_users" permission in the given chat.
+     * Used to decide whether we should attempt to export an invite link.
+     */
+    private static boolean botCanInviteUsers(long chatId) {
+        try {
+            JsonObject me = getMe();
+            if (!me.has("result")) return false;
+            long botId = me.getAsJsonObject("result").get("id").getAsLong();
+
+            String url = BOT_API + "/getChatMember?chat_id=" + chatId + "&user_id=" + botId;
+            Request request = new Request.Builder().url(url).build();
+            Response response = client.newCall(request).execute();
+            String responseBody = response.body().string();
+            JsonObject json = gson.fromJson(responseBody, JsonObject.class);
+
+            if (json.get("ok").getAsBoolean()) {
+                JsonObject result = json.getAsJsonObject("result");
+                // creator always has all permissions
+                String status = result.get("status").getAsString();
+                if (status.equals("creator")) return true;
+                // For administrator, check explicit permission
+                if (result.has("can_invite_users")) {
+                    return result.get("can_invite_users").getAsBoolean();
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("Error checking bot invite permission: " + e.getMessage());
+        }
+        return false;
     }
 
     private static String checkBotStatus(long chatId) {
