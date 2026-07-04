@@ -1,9 +1,7 @@
 import os
-import json
 import logging
-import threading
-import time
 import requests
+import json
 
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
@@ -14,9 +12,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 API_TOKEN = os.getenv("API_TOKEN") or "xpol_Randi_53f66910"
 BASE_URL = "https://xpolitesupgrade-api.darrify-api.workers.dev/api"
 
-# IMPORTANT: Webhook URL must end with /TOKEN
+# Webhook URL - Render automatically provides RENDER_EXTERNAL_HOSTNAME
 RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME", "trialbot-d27t.onrender.com")
-WEBHOOK_URL = f"https://{RENDER_HOST}/{TOKEN}"  # Token must be in URL
+WEBHOOK_URL = f"https://{RENDER_HOST}/{TOKEN}"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,7 +51,7 @@ def format_response(data, indent=0):
     
     return text.strip() or "No data found"
 
-# --------------------- Handlers ---------------------
+# --------------------- Command Handlers ---------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ **Bot Online!**\n\n"
@@ -130,6 +128,14 @@ async def ifscadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in ifscadv: {str(e)}")
         await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle any non-command message"""
+    text = update.message.text
+    if text and text.startswith('+'):
+        await update.message.reply_text("📱 **Phone number received!**\n\nUse `/ip <IP>` or `/ifsc <IFSC>` commands.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Send /start for commands list...")
+
 # --------------------- Application Setup ---------------------
 application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
@@ -141,16 +147,12 @@ application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_me
 # --------------------- Flask Routes ---------------------
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
-    """Handle incoming updates - THIS MUST MATCH WEBHOOK URL"""
+    """Handle incoming updates from Telegram"""
     try:
-        # Get update data
         update_data = request.get_json(force=True)
         logger.info(f"📩 Webhook received: {update_data.get('update_id', 'unknown')}")
-        
-        # Process update
         update = Update.de_json(update_data, bot)
         application.process_update(update)
-        
         return '', 200
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
@@ -168,18 +170,8 @@ def health():
             "status": "ok",
             "webhook_url": info.url,
             "pending_updates": info.pending_update_count,
-            "last_error": info.last_error_message,
-            "last_error_date": info.last_error_date
+            "last_error": info.last_error_message
         })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
-
-@app.route('/setwebhook')
-def set_webhook_route():
-    """Manually trigger webhook setup"""
-    try:
-        bot.set_webhook(url=WEBHOOK_URL, timeout=30)
-        return jsonify({"status": "ok", "message": "Webhook set!", "url": WEBHOOK_URL})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
@@ -187,7 +179,6 @@ def set_webhook_route():
 if __name__ == '__main__':
     logger.info("🚀 Starting application...")
     logger.info(f"📌 Webhook URL: {WEBHOOK_URL}")
-    logger.info(f"📌 Route: /{TOKEN}")
     
     # Set webhook
     try:
