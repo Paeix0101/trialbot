@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import requests
+import asyncio
 
 from flask import Flask, request
 from telegram import Update, Bot
@@ -13,18 +14,15 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TOKEN = os.getenv("BOT_TOKEN")
 API_TOKEN = os.getenv("API_TOKEN") or "xpol_Randi_53f66910"
 OWNER_ID = int(os.getenv("OWNER_ID") or 7735508963)
-USERS_FILE = "users.txt"
-WELCOME_FILE = "welcome.json"
 BASE_URL = "https://xpolitesupgrade-api.darrify-api.workers.dev/api"
 
-# Webhook URL
+# Webhook URL - Render automatically provides RENDER_EXTERNAL_HOSTNAME
 RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if RENDER_HOST:
     WEBHOOK_URL = f"https://{RENDER_HOST}/{TOKEN}"
 else:
-    WEBHOOK_URL = f"https://your-app.onrender.com/{TOKEN}"
-
-# --------------------------------------------------
+    # Fallback - aapko manually dalna hoga
+    WEBHOOK_URL = f"https://trialbot-d27t.onrender.com/{TOKEN}"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,44 +30,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 bot = Bot(token=TOKEN)
 
-# ---------- load & save permanent welcome ----------
-def load_welcome():
-    if not os.path.exists(WELCOME_FILE):
-        return {"text": "✅ **Bot is Online!**\n\n📌 **Commands:**\n▸ `/ip <IP>` - Get IP details\n▸ `/ifsc <IFSC>` - Get IFSC bank details\n▸ `/ifscadv <IFSC>` - Get advanced IFSC details\n\n🔹 **Example:** `/ip 8.8.8.8`", "photo": None}
-    try:
-        with open(WELCOME_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"text": "✅ **Bot is Online!**", "photo": None}
-
-def save_welcome(text, photo):
-    data = {"text": text, "photo": photo}
-    with open(WELCOME_FILE, "w") as f:
-        json.dump(data, f)
-
-welcome_data = load_welcome()
-
-# ---------- persistent users ----------
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        open(USERS_FILE, 'a').close()
-        return set()
-    with open(USERS_FILE, 'r') as f:
-        return {int(line.strip()) for line in f if line.strip()}
-
-def save_user(uid: int):
-    users = load_users()
-    if uid not in users:
-        with open(USERS_FILE, 'a') as f:
-            f.write(f"{uid}\n")
-
-def forward_id(uid: int):
-    try:
-        bot.send_message(chat_id=OWNER_ID, text=f"🆕 New User: `{uid}`", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Failed to forward ID {uid}: {e}")
-
-# ---------- Format Response ----------
+# --------------------- Format Response ---------------------
 def format_response(data, indent=0):
     if not isinstance(data, dict):
         return str(data)
@@ -98,26 +59,20 @@ def format_response(data, indent=0):
     
     return text.strip() or "No data found"
 
-# ---------- Command Handlers ----------
+# --------------------- Handlers ---------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid = user.id
-    save_user(uid)
-    forward_id(uid)
-
-    text = welcome_data["text"]
-    photo = welcome_data["photo"]
-
-    if photo:
-        await bot.send_photo(chat_id=uid, photo=photo, caption=text, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(
+        "✅ **Bot Online!**\n\n"
+        "📌 **Commands:**\n"
+        "▸ `/ip <IP>` - Get IP details\n"
+        "▸ `/ifsc <IFSC>` - Get IFSC bank details\n"
+        "▸ `/ifscadv <IFSC>` - Get advanced IFSC details\n\n"
+        "🔹 **Example:** `/ip 8.8.8.8`\n\n"
+        f"🔗 Webhook: `{WEBHOOK_URL}`",
+        parse_mode="Markdown"
+    )
 
 async def ipinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid = user.id
-    save_user(uid)
-    
     if len(context.args) != 1:
         await update.message.reply_text("❌ **Usage:** `/ip <IP_ADDRESS>`", parse_mode="Markdown")
         return
@@ -129,7 +84,6 @@ async def ipinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = requests.get(f"{BASE_URL}/ipinfo?token={API_TOKEN}&ip={ip}", timeout=15)
         response.raise_for_status()
         data = response.json()
-        logger.info(f"IP API response received for {ip}")
         
         if "response" in data and "data" in data["response"]:
             formatted = format_response(data["response"]["data"])
@@ -144,10 +98,6 @@ async def ipinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
 async def ifsc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid = user.id
-    save_user(uid)
-    
     if len(context.args) != 1:
         await update.message.reply_text("❌ **Usage:** `/ifsc <IFSC_CODE>`", parse_mode="Markdown")
         return
@@ -159,7 +109,6 @@ async def ifsc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = requests.get(f"{BASE_URL}/ifsc-razor?token={API_TOKEN}&ifsc={code}", timeout=15)
         response.raise_for_status()
         data = response.json()
-        logger.info(f"IFSC API response received for {code}")
         formatted = format_response(data)
         await update.message.reply_text(f"🏦 **IFSC Details:** `{code}`\n\n{formatted}", parse_mode="Markdown")
     except requests.exceptions.Timeout:
@@ -169,10 +118,6 @@ async def ifsc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
 async def ifscadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid = user.id
-    save_user(uid)
-    
     if len(context.args) != 1:
         await update.message.reply_text("❌ **Usage:** `/ifscadv <IFSC_CODE>`", parse_mode="Markdown")
         return
@@ -184,7 +129,6 @@ async def ifscadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = requests.get(f"{BASE_URL}/ifsc-adv?token={API_TOKEN}&ifsc={code}", timeout=15)
         response.raise_for_status()
         data = response.json()
-        logger.info(f"IFSCADV API response received for {code}")
         formatted = format_response(data)
         await update.message.reply_text(f"🏦 **Advanced IFSC Details:** `{code}`\n\n{formatted}", parse_mode="Markdown")
     except requests.exceptions.Timeout:
@@ -193,121 +137,16 @@ async def ifscadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in ifscadv: {str(e)}")
         await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
-async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid = user.id
-    save_user(uid)
-    forward_id(uid)
-    
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    if text and text.strip().startswith('+'):
-        await update.message.reply_text("📱 **Phone Number Received!**\n\nUse `/ip <IP>` or `/ifsc <IFSC>` commands.", parse_mode="Markdown")
+    if text and text.startswith('+'):
+        await update.message.reply_text("📱 **Phone number received!**\n\nUse `/ip <IP>` or `/ifsc <IFSC>` commands.", parse_mode="Markdown")
     else:
         await update.message.reply_text("Send /start for commands list...")
 
-async def gbupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.reply_to_message
-    if not msg:
-        await update.message.reply_text("❌ Reply to a message to set as welcome!")
-        return
-    
-    text = msg.caption or msg.text or ""
-    photo = None
-    
-    if msg.photo:
-        photo = msg.photo[-1].file_id
-    elif msg.document:
-        photo = msg.document.file_id
-    
-    save_welcome(text, photo)
-    global welcome_data
-    welcome_data = load_welcome()
-    
-    await update.message.reply_text("✅ **Permanent welcome message updated!**", parse_mode="Markdown")
-
-async def gbboardcaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.reply_to_message
-    if not msg:
-        await update.message.reply_text("❌ Reply to a message to broadcast!")
-        return
-    
-    users = load_users()
-    if not users:
-        await update.message.reply_text("❌ No users to broadcast!")
-        return
-    
-    text = msg.caption or msg.text or ""
-    photo = None
-    
-    if msg.photo:
-        photo = msg.photo[-1].file_id
-    elif msg.document:
-        photo = msg.document.file_id
-    
-    success = 0
-    for uid in users:
-        try:
-            if photo:
-                await bot.send_photo(chat_id=uid, photo=photo, caption=text, parse_mode="Markdown")
-            else:
-                await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
-            success += 1
-        except Exception as e:
-            logger.warning(f"Failed to broadcast to {uid}: {e}")
-    
-    await update.message.reply_text(f"✅ **Broadcast sent to {success}/{len(users)} users!**", parse_mode="Markdown")
-
-# ---------- Webhook Setup ----------
-async def setup_webhook():
-    try:
-        await bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"❌ Failed to set webhook: {e}")
-
-# ---------- Flask Routes ----------
-@app.route('/' + TOKEN, methods=['POST'])
-def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), bot)
-        # Process update using application
-        application.process_update(update)
-        return '', 200
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return '', 500
-
-@app.route('/')
-def index():
-    return '✅ Bot is alive! Use Telegram to interact.'
-
-@app.route('/health')
-def health():
-    return {"status": "ok", "users": len(load_users()), "message": "Bot is running"}
-
-@app.route('/stats')
-def stats():
-    return {
-        "status": "ok",
-        "total_users": len(load_users()),
-        "bot_token": "✅ Set" if TOKEN else "❌ Not Set",
-        "api_token": "✅ Set" if API_TOKEN else "❌ Not Set"
-    }
-
-# ---------- KEEP ALIVE FUNCTION ----------
-def keep_alive():
-    while True:
-        try:
-            home_url = f"https://{RENDER_HOST}" if RENDER_HOST else "https://your-app.onrender.com"
-            requests.get(home_url, timeout=5)
-            logger.info("🔄 Keep-alive ping sent.")
-        except Exception as e:
-            logger.error(f"❌ Keep-alive failed: {e}")
-        time.sleep(300)
-
-# ---------- MAIN ----------
-if __name__ == '__main__':
-    # Create application
+# --------------------- Application Setup ---------------------
+def create_application():
+    """Create and configure the application"""
     application = Application.builder().token(TOKEN).build()
     
     # Add handlers
@@ -315,19 +154,131 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("ip", ipinfo))
     application.add_handler(CommandHandler("ifsc", ifsc))
     application.add_handler(CommandHandler("ifscadv", ifscadv))
-    application.add_handler(CommandHandler("gbupdate", gbupdate))
-    application.add_handler(CommandHandler("gbboardcaste", gbboardcaste))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, any_message))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    
+    return application
+
+# Global application instance
+application = create_application()
+
+# --------------------- Webhook Setup with Retry ---------------------
+def set_webhook_with_retry(max_retries=5, delay=5):
+    """Set webhook with retry mechanism"""
+    logger.info(f"🔄 Setting webhook: {WEBHOOK_URL}")
+    
+    for attempt in range(max_retries):
+        try:
+            # Check current webhook
+            current = bot.get_webhook_info()
+            logger.info(f"Current webhook: {current.url}")
+            
+            if current.url == WEBHOOK_URL:
+                logger.info("✅ Webhook already set correctly!")
+                return True
+            
+            # Set webhook with longer timeout
+            bot.set_webhook(
+                url=WEBHOOK_URL,
+                timeout=30,
+                drop_pending_updates=False
+            )
+            
+            # Verify
+            time.sleep(2)
+            new_info = bot.get_webhook_info()
+            if new_info.url == WEBHOOK_URL:
+                logger.info(f"✅ Webhook set successfully! (Attempt {attempt + 1})")
+                return True
+            else:
+                logger.warning(f"Webhook verification failed. Expected: {WEBHOOK_URL}, Got: {new_info.url}")
+                
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                logger.error("❌ All webhook setting attempts failed!")
+                return False
+    
+    return False
+
+# --------------------- Flask Routes ---------------------
+@app.route('/' + TOKEN, methods=['POST'])
+def webhook():
+    """Handle incoming updates"""
+    try:
+        # Get update data
+        update_data = request.get_json(force=True)
+        logger.info("📩 Webhook received update")
+        
+        # Process update
+        update = Update.de_json(update_data, bot)
+        application.process_update(update)
+        
+        return '', 200
+    except Exception as e:
+        logger.error(f"Webhook processing error: {str(e)}")
+        return '', 500
+
+@app.route('/')
+def home():
+    return "✅ Bot is running with Webhook!"
+
+@app.route('/health')
+def health():
+    try:
+        info = bot.get_webhook_info()
+        return {
+            "status": "ok",
+            "webhook_url": info.url,
+            "pending_updates": info.pending_update_count,
+            "last_error": info.last_error_message,
+            "last_error_date": info.last_error_date
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.route('/setwebhook')
+def set_webhook_route():
+    """Manually trigger webhook setup"""
+    success = set_webhook_with_retry()
+    if success:
+        return {"status": "ok", "message": "Webhook set successfully!", "url": WEBHOOK_URL}
+    else:
+        return {"status": "error", "message": "Failed to set webhook"}
+
+# --------------------- Keep Alive ---------------------
+def keep_alive():
+    """Keep the service alive"""
+    while True:
+        try:
+            home_url = f"https://{RENDER_HOST}" if RENDER_HOST else "https://trialbot-d27t.onrender.com"
+            requests.get(home_url, timeout=5)
+            logger.info("🔄 Keep-alive ping sent.")
+        except Exception as e:
+            logger.error(f"Keep-alive failed: {e}")
+        time.sleep(300)  # 5 minutes
+
+# --------------------- Main ---------------------
+if __name__ == '__main__':
+    logger.info("🚀 Starting application...")
+    logger.info(f"📌 Webhook URL: {WEBHOOK_URL}")
+    logger.info(f"🤖 Bot Token: {TOKEN[:10]}...")
     
     # Set webhook
-    import asyncio
-    asyncio.run(setup_webhook())
+    success = set_webhook_with_retry(max_retries=5, delay=3)
+    
+    if not success:
+        logger.warning("⚠️ Webhook setup failed! You can manually set it using:")
+        logger.warning(f"   https://api.telegram.org/bot{TOKEN}/setWebhook?url={WEBHOOK_URL}")
+        logger.warning("   Or visit: /setwebhook route")
     
     # Start keep-alive thread
     threading.Thread(target=keep_alive, daemon=True).start()
     logger.info("🔄 Keep-alive thread started")
     
-    # Run Flask app
+    # Run Flask
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"🚀 Starting Flask app on port {port}")
+    logger.info(f"🌐 Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port)
