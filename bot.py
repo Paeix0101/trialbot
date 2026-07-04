@@ -7,17 +7,22 @@ import requests
 
 from flask import Flask, request
 from telegram import Update, Bot
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --------------------- CONFIG ---------------------
-TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render
+TOKEN = os.getenv("BOT_TOKEN")
 API_TOKEN = os.getenv("API_TOKEN") or "xpol_Randi_53f66910"
 OWNER_ID = int(os.getenv("OWNER_ID") or 7735508963)
 USERS_FILE = "users.txt"
 WELCOME_FILE = "welcome.json"
 BASE_URL = "https://xpolitesupgrade-api.darrify-api.workers.dev/api"
 
-WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'your-app.onrender.com')}/{TOKEN}"
+# Webhook URL
+RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+if RENDER_HOST:
+    WEBHOOK_URL = f"https://{RENDER_HOST}/{TOKEN}"
+else:
+    WEBHOOK_URL = f"https://your-app.onrender.com/{TOKEN}"
 
 # --------------------------------------------------
 
@@ -26,9 +31,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 bot = Bot(token=TOKEN)
-dispatcher = Dispatcher(bot, None, use_context=True)
-
-lock = threading.Lock()
 
 # ---------- load & save permanent welcome ----------
 def load_welcome():
@@ -38,7 +40,7 @@ def load_welcome():
         with open(WELCOME_FILE, "r") as f:
             return json.load(f)
     except:
-        return {"text": "✅ **Bot is Online!**\n\n📌 **Commands:**\n▸ `/ip <IP>` - Get IP details\n▸ `/ifsc <IFSC>` - Get IFSC bank details\n▸ `/ifscadv <IFSC>` - Get advanced IFSC details", "photo": None}
+        return {"text": "✅ **Bot is Online!**", "photo": None}
 
 def save_welcome(text, photo):
     data = {"text": text, "photo": photo}
@@ -56,11 +58,10 @@ def load_users():
         return {int(line.strip()) for line in f if line.strip()}
 
 def save_user(uid: int):
-    with lock:
-        users = load_users()
-        if uid not in users:
-            with open(USERS_FILE, 'a') as f:
-                f.write(f"{uid}\n")
+    users = load_users()
+    if uid not in users:
+        with open(USERS_FILE, 'a') as f:
+            f.write(f"{uid}\n")
 
 def forward_id(uid: int):
     try:
@@ -70,7 +71,6 @@ def forward_id(uid: int):
 
 # ---------- Format Response ----------
 def format_response(data, indent=0):
-    """Recursively format nested JSON response"""
     if not isinstance(data, dict):
         return str(data)
     
@@ -99,7 +99,7 @@ def format_response(data, indent=0):
     return text.strip() or "No data found"
 
 # ---------- Command Handlers ----------
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = user.id
     save_user(uid)
@@ -109,21 +109,21 @@ def start(update: Update, context: CallbackContext):
     photo = welcome_data["photo"]
 
     if photo:
-        bot.send_photo(chat_id=uid, photo=photo, caption=text, parse_mode="Markdown")
+        await bot.send_photo(chat_id=uid, photo=photo, caption=text, parse_mode="Markdown")
     else:
-        bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="Markdown")
 
-def ipinfo(update: Update, context: CallbackContext):
+async def ipinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = user.id
     save_user(uid)
     
     if len(context.args) != 1:
-        update.message.reply_text("❌ **Usage:** `/ip <IP_ADDRESS>`", parse_mode="Markdown")
+        await update.message.reply_text("❌ **Usage:** `/ip <IP_ADDRESS>`", parse_mode="Markdown")
         return
     
     ip = context.args[0]
-    update.message.reply_text(f"⏳ Fetching details for `{ip}`...", parse_mode="Markdown")
+    await update.message.reply_text(f"⏳ Fetching details for `{ip}`...", parse_mode="Markdown")
     
     try:
         response = requests.get(f"{BASE_URL}/ipinfo?token={API_TOKEN}&ip={ip}", timeout=15)
@@ -136,24 +136,24 @@ def ipinfo(update: Update, context: CallbackContext):
         else:
             formatted = format_response(data)
             
-        update.message.reply_text(f"🌐 **IP Details:** `{ip}`\n\n{formatted}", parse_mode="Markdown")
+        await update.message.reply_text(f"🌐 **IP Details:** `{ip}`\n\n{formatted}", parse_mode="Markdown")
     except requests.exceptions.Timeout:
-        update.message.reply_text("❌ **Timeout:** API not responding", parse_mode="Markdown")
+        await update.message.reply_text("❌ **Timeout:** API not responding", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in ipinfo: {str(e)}")
-        update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
-def ifsc(update: Update, context: CallbackContext):
+async def ifsc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = user.id
     save_user(uid)
     
     if len(context.args) != 1:
-        update.message.reply_text("❌ **Usage:** `/ifsc <IFSC_CODE>`", parse_mode="Markdown")
+        await update.message.reply_text("❌ **Usage:** `/ifsc <IFSC_CODE>`", parse_mode="Markdown")
         return
     
     code = context.args[0].upper()
-    update.message.reply_text(f"⏳ Fetching IFSC details for `{code}`...", parse_mode="Markdown")
+    await update.message.reply_text(f"⏳ Fetching IFSC details for `{code}`...", parse_mode="Markdown")
     
     try:
         response = requests.get(f"{BASE_URL}/ifsc-razor?token={API_TOKEN}&ifsc={code}", timeout=15)
@@ -161,24 +161,24 @@ def ifsc(update: Update, context: CallbackContext):
         data = response.json()
         logger.info(f"IFSC API response received for {code}")
         formatted = format_response(data)
-        update.message.reply_text(f"🏦 **IFSC Details:** `{code}`\n\n{formatted}", parse_mode="Markdown")
+        await update.message.reply_text(f"🏦 **IFSC Details:** `{code}`\n\n{formatted}", parse_mode="Markdown")
     except requests.exceptions.Timeout:
-        update.message.reply_text("❌ **Timeout:** API not responding", parse_mode="Markdown")
+        await update.message.reply_text("❌ **Timeout:** API not responding", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in ifsc: {str(e)}")
-        update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
-def ifscadv(update: Update, context: CallbackContext):
+async def ifscadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = user.id
     save_user(uid)
     
     if len(context.args) != 1:
-        update.message.reply_text("❌ **Usage:** `/ifscadv <IFSC_CODE>`", parse_mode="Markdown")
+        await update.message.reply_text("❌ **Usage:** `/ifscadv <IFSC_CODE>`", parse_mode="Markdown")
         return
     
     code = context.args[0].upper()
-    update.message.reply_text(f"⏳ Fetching advanced IFSC details for `{code}`...", parse_mode="Markdown")
+    await update.message.reply_text(f"⏳ Fetching advanced IFSC details for `{code}`...", parse_mode="Markdown")
     
     try:
         response = requests.get(f"{BASE_URL}/ifsc-adv?token={API_TOKEN}&ifsc={code}", timeout=15)
@@ -186,30 +186,29 @@ def ifscadv(update: Update, context: CallbackContext):
         data = response.json()
         logger.info(f"IFSCADV API response received for {code}")
         formatted = format_response(data)
-        update.message.reply_text(f"🏦 **Advanced IFSC Details:** `{code}`\n\n{formatted}", parse_mode="Markdown")
+        await update.message.reply_text(f"🏦 **Advanced IFSC Details:** `{code}`\n\n{formatted}", parse_mode="Markdown")
     except requests.exceptions.Timeout:
-        update.message.reply_text("❌ **Timeout:** API not responding", parse_mode="Markdown")
+        await update.message.reply_text("❌ **Timeout:** API not responding", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in ifscadv: {str(e)}")
-        update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
-def any_message(update: Update, context: CallbackContext):
+async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = user.id
     save_user(uid)
     forward_id(uid)
     
-    # Check if message contains a phone number
     text = update.message.text
     if text and text.strip().startswith('+'):
-        update.message.reply_text("📱 **Phone Number Received!**\n\nUse `/ip <IP>` or `/ifsc <IFSC>` commands.", parse_mode="Markdown")
+        await update.message.reply_text("📱 **Phone Number Received!**\n\nUse `/ip <IP>` or `/ifsc <IFSC>` commands.", parse_mode="Markdown")
     else:
-        update.message.reply_text("Send /start for commands list...")
+        await update.message.reply_text("Send /start for commands list...")
 
-def gbupdate(update: Update, context: CallbackContext):
+async def gbupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.reply_to_message
     if not msg:
-        update.message.reply_text("❌ Reply to a message to set as welcome!")
+        await update.message.reply_text("❌ Reply to a message to set as welcome!")
         return
     
     text = msg.caption or msg.text or ""
@@ -224,17 +223,17 @@ def gbupdate(update: Update, context: CallbackContext):
     global welcome_data
     welcome_data = load_welcome()
     
-    update.message.reply_text("✅ **Permanent welcome message updated!**", parse_mode="Markdown")
+    await update.message.reply_text("✅ **Permanent welcome message updated!**", parse_mode="Markdown")
 
-def gbboardcaste(update: Update, context: CallbackContext):
+async def gbboardcaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.reply_to_message
     if not msg:
-        update.message.reply_text("❌ Reply to a message to broadcast!")
+        await update.message.reply_text("❌ Reply to a message to broadcast!")
         return
     
     users = load_users()
     if not users:
-        update.message.reply_text("❌ No users to broadcast!")
+        await update.message.reply_text("❌ No users to broadcast!")
         return
     
     text = msg.caption or msg.text or ""
@@ -249,30 +248,34 @@ def gbboardcaste(update: Update, context: CallbackContext):
     for uid in users:
         try:
             if photo:
-                bot.send_photo(chat_id=uid, photo=photo, caption=text, parse_mode="Markdown")
+                await bot.send_photo(chat_id=uid, photo=photo, caption=text, parse_mode="Markdown")
             else:
-                bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+                await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
             success += 1
         except Exception as e:
             logger.warning(f"Failed to broadcast to {uid}: {e}")
     
-    update.message.reply_text(f"✅ **Broadcast sent to {success}/{len(users)} users!**", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ **Broadcast sent to {success}/{len(users)} users!**", parse_mode="Markdown")
 
-# ---------- register handlers ----------
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("ip", ipinfo))
-dispatcher.add_handler(CommandHandler("ifsc", ifsc))
-dispatcher.add_handler(CommandHandler("ifscadv", ifscadv))
-dispatcher.add_handler(CommandHandler("gbupdate", gbupdate))
-dispatcher.add_handler(CommandHandler("gbboardcaste", gbboardcaste))
-dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, any_message))
+# ---------- Webhook Setup ----------
+async def setup_webhook():
+    try:
+        await bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"❌ Failed to set webhook: {e}")
 
-# ---------- webhook ----------
+# ---------- Flask Routes ----------
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return '', 200
+    try:
+        update = Update.de_json(request.get_json(force=True), bot)
+        # Process update using application
+        application.process_update(update)
+        return '', 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return '', 500
 
 @app.route('/')
 def index():
@@ -291,34 +294,34 @@ def stats():
         "api_token": "✅ Set" if API_TOKEN else "❌ Not Set"
     }
 
-def set_webhook():
-    try:
-        current = bot.get_webhook_info()
-        if current.url != WEBHOOK_URL:
-            bot.set_webhook(url=WEBHOOK_URL)
-            logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-        else:
-            logger.info(f"✅ Webhook already set to {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"❌ Failed to set webhook: {e}")
-
 # ---------- KEEP ALIVE FUNCTION ----------
 def keep_alive():
-    """Pings the Render app every 5 minutes to keep it alive."""
     while True:
         try:
-            # Use the home URL instead of webhook URL to avoid recursion
-            home_url = WEBHOOK_URL.replace(f"/{TOKEN}", "")
+            home_url = f"https://{RENDER_HOST}" if RENDER_HOST else "https://your-app.onrender.com"
             requests.get(home_url, timeout=5)
             logger.info("🔄 Keep-alive ping sent.")
         except Exception as e:
             logger.error(f"❌ Keep-alive failed: {e}")
-        time.sleep(300)  # 5 minutes
+        time.sleep(300)
 
 # ---------- MAIN ----------
 if __name__ == '__main__':
+    # Create application
+    application = Application.builder().token(TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("ip", ipinfo))
+    application.add_handler(CommandHandler("ifsc", ifsc))
+    application.add_handler(CommandHandler("ifscadv", ifscadv))
+    application.add_handler(CommandHandler("gbupdate", gbupdate))
+    application.add_handler(CommandHandler("gbboardcaste", gbboardcaste))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, any_message))
+    
     # Set webhook
-    set_webhook()
+    import asyncio
+    asyncio.run(setup_webhook())
     
     # Start keep-alive thread
     threading.Thread(target=keep_alive, daemon=True).start()
