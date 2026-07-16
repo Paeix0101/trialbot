@@ -25,10 +25,8 @@ bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 lock = threading.Lock()
 
-# --------------------- FREE PUBLIC APIs ---------------------
+# --------------------- API Functions (Educational) ---------------------
 def get_ifsc_info(ifsc_code):
-    """IFSC Details using Free APIs"""
-    # Primary: Razorpay (Best)
     try:
         url = f"https://ifsc.razorpay.com/{ifsc_code}"
         response = requests.get(url, timeout=10)
@@ -36,23 +34,9 @@ def get_ifsc_info(ifsc_code):
             return response.json()
     except:
         pass
-
-    # Backup API
-    try:
-        url = f"https://bank-apis.justinclicks.com/API/V1/IFSC/{ifsc_code}/"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if not data.get("error"):
-                return data
-    except:
-        pass
-
-    return {"error": "IFSC details not found or API issue"}
-
+    return {"error": "IFSC details not found"}
 
 def get_ip_info(ip_address):
-    """IP Details using Free API"""
     try:
         url = f"https://ipapi.co/{ip_address}/json/"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -63,20 +47,29 @@ def get_ip_info(ip_address):
         pass
     return {"error": "IP details not found"}
 
-
 def get_upi_info(upi_id):
-    """UPI Details (Limited free support)"""
-    return {"error": "UPI detailed info currently not available in free APIs"}
+    """Study Purpose Only"""
+    return {
+        "upi_id": upi_id,
+        "status": "Detected",
+        "note": "Full bank holder details are protected under banking privacy laws.",
+        "message": "Only public handle detection is possible in free environment."
+    }
 
+def get_phone_info(phone):
+    """Study Purpose Only - No real lookup"""
+    return {
+        "phone_number": phone,
+        "status": "Detected",
+        "note": "Reverse phone lookup is restricted in India due to privacy regulations (IT Act, DPDP Act).",
+        "message": "For educational OSINT, you can study patterns but real personal data requires legal authorization."
+    }
 
 def format_response(data, title):
-    if not data or (isinstance(data, dict) and "error" in data):
-        return f"⚠️ {title} Error: {data.get('error', 'No data available')}"
-
     formatted = [f"📊 **{title} Details:**\n"]
     for key, value in data.items():
-        if value and value not in ["null", None, "", {}, []]:
-            formatted.append(f"• {key.replace('_', ' ').replace('-', ' ').title()}: {value}")
+        if value:
+            formatted.append(f"• {key.replace('_', ' ').title()}: {value}")
     return "\n".join(formatted)
 
 
@@ -175,7 +168,9 @@ def process_message(text):
     # Phone
     phone = detect_phone(text)
     if phone:
-        return f"📱 **Phone Number Detected:** `{phone}`\n\nℹ️ Currently IFSC & IP details are supported."
+        response = f"📱 **Detected Phone Number:** `{phone}`\n\n"
+        data = get_phone_info(phone)
+        return response + format_response(data, "Phone")
 
     return None
 
@@ -205,12 +200,12 @@ def any_message(update: Update, context: CallbackContext):
         update.message.reply_text(response, parse_mode='Markdown')
     else:
         update.message.reply_text(
-            "🤖 **Main yeh support karta hu:**\n"
-            "• IFSC Code (Bank Details)\n"
+            "🤖 **Supported for Study:**\n"
+            "• IFSC Code\n"
             "• IP Address\n"
-            "• UPI ID (Limited)\n"
-            "• Phone Number (Detection Only)\n\n"
-            "Kuch bhi bhej ke try karo!",
+            "• UPI ID (Detection + Info)\n"
+            "• Phone Number (Detection + Legal Note)\n\n"
+            "Try sending any of these!",
             parse_mode='Markdown'
         )
 
