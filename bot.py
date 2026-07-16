@@ -14,7 +14,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 7735508963
 USERS_FILE = "users.txt"
 WELCOME_FILE = "welcome.json"
-API_TOKEN = "xpol_Randi_53f66910"
 WEBHOOK_URL = f"https://trialbot-d27t.onrender.com/{TOKEN}"
 # --------------------------------------------------
 
@@ -26,55 +25,48 @@ bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 lock = threading.Lock()
 
-# --------------------- API Functions ---------------------
+# --------------------- FREE PUBLIC APIs ---------------------
 def get_ifsc_info(ifsc_code):
-    results = {}
+    """IFSC Details using Free APIs"""
+    # Primary: Razorpay (Best)
     try:
-        # IFSC Advanced
-        url1 = f"https://xpolitesupgrade-api.darrify-api.workers.dev/api/ifsc-adv?token={API_TOKEN}&ifsc={ifsc_code}"
-        resp1 = requests.get(url1, timeout=10)
-        if resp1.status_code == 200:
-            results['adv'] = resp1.json()
+        url = f"https://ifsc.razorpay.com/{ifsc_code}"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json()
     except:
         pass
 
+    # Backup API
     try:
-        # IFSC Razor
-        url2 = f"https://xpolitesupgrade-api.darrify-api.workers.dev/api/ifsc-razor?token={API_TOKEN}&ifsc={ifsc_code}"
-        resp2 = requests.get(url2, timeout=10)
-        if resp2.status_code == 200:
-            results['razor'] = resp2.json()
+        url = f"https://bank-apis.justinclicks.com/API/V1/IFSC/{ifsc_code}/"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if not data.get("error"):
+                return data
     except:
         pass
 
-    return results
+    return {"error": "IFSC details not found or API issue"}
 
 
 def get_ip_info(ip_address):
+    """IP Details using Free API"""
     try:
-        url = f"https://xpolitesupgrade-api.darrify-api.workers.dev/api/ipinfo?token={API_TOKEN}&ip={ip_address}"
-        response = requests.get(url, timeout=10)
-        return response.json() if response.status_code == 200 else {"error": "Failed to fetch IP info"}
+        url = f"https://ipapi.co/{ip_address}/json/"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
     except:
-        return {"error": "API Error"}
+        pass
+    return {"error": "IP details not found"}
 
 
 def get_upi_info(upi_id):
-    try:
-        endpoints = [
-            f"https://xpolitesupgrade-api.darrify-api.workers.dev/api/upi?token={API_TOKEN}&upi={upi_id}",
-            f"https://xpolitesupgrade-api.darrify-api.workers.dev/api/upicheck?token={API_TOKEN}&upi={upi_id}",
-            f"https://xpolitesupgrade-api.darrify-api.workers.dev/api/vpa?token={API_TOKEN}&vpa={upi_id}",
-        ]
-        for url in endpoints:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if data and not data.get("error"):
-                    return data
-        return {"error": "UPI details not found"}
-    except Exception as e:
-        return {"error": str(e)}
+    """UPI Details (Limited free support)"""
+    return {"error": "UPI detailed info currently not available in free APIs"}
 
 
 def format_response(data, title):
@@ -82,19 +74,9 @@ def format_response(data, title):
         return f"⚠️ {title} Error: {data.get('error', 'No data available')}"
 
     formatted = [f"📊 **{title} Details:**\n"]
-    
-    if title == "IFSC":
-        for source, info in data.items():
-            if isinstance(info, dict):
-                formatted.append(f"\n**{source.upper()} Source:**")
-                for key, value in info.items():
-                    if value and value not in ["null", None, "", {}, []]:
-                        formatted.append(f"• {key.replace('_', ' ').title()}: {value}")
-    else:
-        for key, value in data.items():
-            if value and value not in ["null", None, "", {}, []]:
-                formatted.append(f"• {key.replace('_', ' ').title()}: {value}")
-
+    for key, value in data.items():
+        if value and value not in ["null", None, "", {}, []]:
+            formatted.append(f"• {key.replace('_', ' ').replace('-', ' ').title()}: {value}")
     return "\n".join(formatted)
 
 
@@ -144,19 +126,11 @@ def forward_id(uid: int):
 # --------------------- Detection Functions ---------------------
 def detect_ifsc(text):
     pattern = r'\b[A-Z]{4}0[A-Z0-9]{6}\b'
-    match = re.search(pattern, text)
-    return match.group(0) if match else None
-
-
-def detect_phone(text):
-    cleaned = re.sub(r'[\s\-\(\)\+]', '', text)
-    pattern = r'\b[0-9]{10}\b'
-    match = re.search(pattern, cleaned)
+    match = re.search(pattern, text.upper())
     return match.group(0) if match else None
 
 
 def detect_upi(text):
-    """Improved UPI Detection - Supports @ptyes, @paytm, @oksbi, @ybl etc."""
     pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9]+\b'
     match = re.search(pattern, text)
     return match.group(0) if match else None
@@ -168,8 +142,15 @@ def detect_ip(text):
     return match.group(0) if match else None
 
 
+def detect_phone(text):
+    cleaned = re.sub(r'[\s\-\(\)\+]', '', text)
+    pattern = r'\b[0-9]{10}\b'
+    match = re.search(pattern, cleaned)
+    return match.group(0) if match else None
+
+
 # --------------------- Process Message ---------------------
-def process_message(text, user_id):
+def process_message(text):
     # IFSC
     ifsc = detect_ifsc(text)
     if ifsc:
@@ -194,7 +175,7 @@ def process_message(text, user_id):
     # Phone
     phone = detect_phone(text)
     if phone:
-        return f"📱 **Phone Number Detected:** `{phone}`\n\nℹ️ Currently only IFSC, UPI & IP details are supported."
+        return f"📱 **Phone Number Detected:** `{phone}`\n\nℹ️ Currently IFSC & IP details are supported."
 
     return None
 
@@ -218,16 +199,16 @@ def any_message(update: Update, context: CallbackContext):
     forward_id(user.id)
     
     text = update.message.text or ""
-    response = process_message(text, user.id)
+    response = process_message(text)
     
     if response:
         update.message.reply_text(response, parse_mode='Markdown')
     else:
         update.message.reply_text(
             "🤖 **Main yeh support karta hu:**\n"
-            "• IFSC Code (Full Bank Details)\n"
-            "• UPI ID (Bank Details)\n"
+            "• IFSC Code (Bank Details)\n"
             "• IP Address\n"
+            "• UPI ID (Limited)\n"
             "• Phone Number (Detection Only)\n\n"
             "Kuch bhi bhej ke try karo!",
             parse_mode='Markdown'
