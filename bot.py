@@ -83,7 +83,6 @@ def format_response(data, title):
 
     formatted = [f"📊 **{title} Details:**\n"]
     
-    # Handle combined IFSC data
     if title == "IFSC":
         for source, info in data.items():
             if isinstance(info, dict):
@@ -157,7 +156,8 @@ def detect_phone(text):
 
 
 def detect_upi(text):
-    pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    """Improved UPI Detection - Supports @ptyes, @paytm, @oksbi, @ybl etc."""
+    pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9]+\b'
     match = re.search(pattern, text)
     return match.group(0) if match else None
 
