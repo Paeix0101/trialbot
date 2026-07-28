@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Chat</title>
+
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="sidebar">
+
+        <h2>Telegram Clone</h2>
+
+        <h3>{{ me }}</h3>
+
+        <a href="/logout">
+            Logout
+        </a>
+
+        <hr>
+
+        <input
+            type="text"
+            id="search"
+            placeholder="Search User..."
+            onkeyup="searchUser()"
+        >
+
+        <div id="users">
+
+            {% for user in users %}
+
+            <div class="user" onclick="openChat('{{ user }}')">
+
+                {{ user }}
+
+            </div>
+
+            {% endfor %}
+
+        </div>
+
+    </div>
+
+    <div class="chat">
+
+        <h2 id="chatUser">
+
+            Select User
+
+        </h2>
+
+        <div
+            id="messages"
+            class="messages"
+        >
+
+        </div>
+
+        <form
+            action="/send"
+            method="POST"
+        >
+
+            <input
+                type="hidden"
+                id="receiver"
+                name="receiver"
+            >
+
+            <input
+                type="text"
+                name="message"
+                placeholder="Type message..."
+                required
+            >
+
+            <button>
+
+                Send
+
+            </button>
+
+        </form>
+
+    </div>
+
+</div>
+
+<script>
+
+let currentUser = "";
+
+function searchUser(){
+
+    let input =
+        document
+        .getElementById("search")
+        .value
+        .toLowerCase();
+
+    let users =
+        document
+        .getElementsByClassName("user");
+
+    for(let i=0;i<users.length;i++){
+
+        let txt =
+            users[i]
+            .innerText
+            .toLowerCase();
+
+        if(txt.indexOf(input)>-1){
+
+            users[i].style.display="block";
+
+        }
+
+        else{
+
+            users[i].style.display="none";
+
+        }
+
+    }
+
+}
+
+function openChat(user){
+
+    currentUser=user;
+
+    document
+    .getElementById("receiver")
+    .value=user;
+
+    document
+    .getElementById("chatUser")
+    .innerHTML=user;
+
+    loadMessages();
+
+}
+
+function loadMessages(){
+
+    fetch("/messages/"+currentUser)
+
+    .then(r=>r.json())
+
+    .then(data=>{
+
+        let html="";
+
+        data.forEach(function(msg){
+
+            html+=`
+            <p>
+
+            <b>${msg.from}</b>
+
+            : ${msg.message}
+
+            </p>
+            `;
+
+        });
+
+        document
+        .getElementById("messages")
+        .innerHTML=html;
+
+    });
+
+}
+
+setInterval(function(){
+
+    if(currentUser!=""){
+
+        loadMessages();
+
+    }
+
+},2000);
+
+</script>
+
+</body>
+
+</html>
