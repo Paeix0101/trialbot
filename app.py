@@ -98,16 +98,43 @@ def chat():
     )
 
 
+# ---------------- LIVE USER LIST (NEW) ---------------- #
+# Sidebar polls this every few seconds so newly registered
+# users (e.g. "suman") show up for "sahil" without a page refresh.
+
+@app.route("/api/users")
+def api_users():
+
+    if "user" not in session:
+        return jsonify([])
+
+    me = session["user"]
+
+    users = load_users()
+
+    users = [u for u in users if u != me]
+
+    return jsonify(users)
+
+
 # ---------------- SEND MESSAGE ---------------- #
+# Now returns JSON (used with fetch/AJAX) instead of redirecting,
+# so the page no longer reloads and loses the selected chat.
 
 @app.route("/send", methods=["POST"])
 def send():
 
+    if "user" not in session:
+        return jsonify({"status": "error", "message": "Not logged in"}), 401
+
     sender = session["user"]
 
-    receiver = request.form["receiver"]
+    receiver = request.form.get("receiver", "").strip().lower()
 
-    message = request.form["message"]
+    message = request.form.get("message", "").strip()
+
+    if not receiver or not message:
+        return jsonify({"status": "error", "message": "Receiver and message required"}), 400
 
     messages = load_messages()
 
@@ -121,13 +148,16 @@ def send():
 
     save_messages(messages)
 
-    return redirect("/chat")
+    return jsonify({"status": "ok"})
 
 
 # ---------------- LOAD CHAT ---------------- #
 
 @app.route("/messages/<receiver>")
 def messages(receiver):
+
+    if "user" not in session:
+        return jsonify([])
 
     me = session["user"]
 

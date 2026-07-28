@@ -67,8 +67,8 @@
         </div>
 
         <form
-            action="/send"
-            method="POST"
+            id="sendForm"
+            onsubmit="return sendMessage(event)"
         >
 
             <input
@@ -79,6 +79,7 @@
 
             <input
                 type="text"
+                id="messageInput"
                 name="message"
                 placeholder="Type message..."
                 required
@@ -100,13 +101,65 @@
 
 let currentUser = "";
 
-function searchUser(){
+// ---------- Render user list (used for both initial load and live refresh) ---------- //
 
-    let input =
+function renderUsers(users){
+
+    let container = document.getElementById("users");
+
+    let searchVal =
         document
         .getElementById("search")
         .value
         .toLowerCase();
+
+    let html = "";
+
+    users.forEach(function(user){
+
+        html += `
+        <div class="user" onclick="openChat('${user}')">
+
+            ${user}
+
+        </div>
+        `;
+
+    });
+
+    container.innerHTML = html;
+
+    // re-apply current search filter after refresh
+    searchUser(searchVal);
+
+}
+
+// ---------- Fetch latest user list from server (so a newly signed up ---------- //
+// ---------- user like "suman" shows up for "sahil" without reload)   ---------- //
+
+function refreshUsers(){
+
+    fetch("/api/users")
+
+    .then(r => r.json())
+
+    .then(data => {
+
+        renderUsers(data);
+
+    });
+
+}
+
+function searchUser(forcedValue){
+
+    let input =
+        forcedValue !== undefined
+        ? forcedValue
+        : document
+            .getElementById("search")
+            .value
+            .toLowerCase();
 
     let users =
         document
@@ -117,7 +170,8 @@ function searchUser(){
         let txt =
             users[i]
             .innerText
-            .toLowerCase();
+            .toLowerCase()
+            .trim();
 
         if(txt.indexOf(input)>-1){
 
@@ -179,10 +233,77 @@ function loadMessages(){
         .getElementById("messages")
         .innerHTML=html;
 
+        // auto scroll to latest message
+        let box = document.getElementById("messages");
+        box.scrollTop = box.scrollHeight;
+
     });
 
 }
 
+// ---------- Send message via fetch (no page reload) ---------- //
+
+function sendMessage(event){
+
+    event.preventDefault();
+
+    if(currentUser === ""){
+
+        alert("Pehle ek user select karo chat karne ke liye");
+
+        return false;
+
+    }
+
+    let messageInput = document.getElementById("messageInput");
+
+    let message = messageInput.value.trim();
+
+    if(message === ""){
+
+        return false;
+
+    }
+
+    let formData = new FormData();
+
+    formData.append("receiver", currentUser);
+
+    formData.append("message", message);
+
+    fetch("/send", {
+
+        method: "POST",
+
+        body: formData
+
+    })
+
+    .then(r => r.json())
+
+    .then(data => {
+
+        if(data.status === "ok"){
+
+            messageInput.value = "";
+
+            loadMessages();
+
+        }
+
+        else{
+
+            alert(data.message || "Message send nahi hui");
+
+        }
+
+    });
+
+    return false;
+
+}
+
+// poll messages of the open chat
 setInterval(function(){
 
     if(currentUser!=""){
@@ -192,6 +313,9 @@ setInterval(function(){
     }
 
 },2000);
+
+// poll user list so new signups appear live
+setInterval(refreshUsers, 3000);
 
 </script>
 
